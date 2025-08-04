@@ -8,7 +8,7 @@ import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Card, CardContent } from "@/components/ui/card"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Loader2, Truck, Package, Users, Eye, EyeOff } from "lucide-react"
 import { ThemeToggle } from "@/components/theme-toggle"
@@ -262,6 +262,62 @@ export default function AuthPage() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
         <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-blue-600"></div>
+      </div>
+    )
+  }
+
+  if (user && profile) {
+    return (
+      <div className="min-h-screen bg-gray-50 p-4">
+        <div className="max-w-4xl mx-auto">
+          <Card>
+            <CardHeader>
+              <CardTitle>Welcome to LMDOS</CardTitle>
+              <CardDescription>
+                Logged in as {profile.email} ({profile.role})
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-4">
+                <div>
+                  <h3 className="text-lg font-semibold">Profile Information</h3>
+                  <div className="mt-2 space-y-1">
+                    <p>
+                      <strong>Name:</strong> {profile.first_name} {profile.last_name}
+                    </p>
+                    <p>
+                      <strong>Email:</strong> {profile.email}
+                    </p>
+                    <p>
+                      <strong>Role:</strong> {profile.role}
+                    </p>
+                    <p>
+                      <strong>Phone:</strong> {profile.phone || "Not provided"}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex space-x-4">
+                  {profile.role === "super_admin" && (
+                    <Button asChild>
+                      <a href="/super-admin">Super Admin Dashboard</a>
+                    </Button>
+                  )}
+                  {(profile.role === "admin" || profile.role === "super_admin") && (
+                    <Button asChild>
+                      <a href="/admin">Admin Dashboard</a>
+                    </Button>
+                  )}
+                  {profile.role === "driver" && (
+                    <Button asChild>
+                      <a href="/driver">Driver Dashboard</a>
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       </div>
     )
   }

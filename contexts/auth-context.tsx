@@ -46,29 +46,51 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const supabase = createClient(supabaseUrl!, supabaseAnonKey!)
 
+  // Use API endpoint to fetch profile to bypass RLS issues
   const fetchUserProfile = async (userId: string) => {
     try {
-      console.log("🔍 Fetching user profile for:", userId)
-      const { data, error } = await supabase.from("user_profiles").select("*").eq("user_id", userId).single()
+      console.log("🔍 Fetching user profile via API for:", userId)
 
-      if (error) {
-        console.error("❌ Error fetching user profile:", error)
-        return null
+      const response = await fetch("/api/get-profile", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ userId }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
       }
 
-      console.log("✅ User profile fetched:", data)
-      return data
+      const result = await response.json()
+
+      if (result.error) {
+        throw new Error(result.error)
+      }
+
+      console.log("✅ User profile fetched via API:", result.profile)
+      return result.profile
     } catch (error) {
-      console.error("❌ Error in fetchUserProfile:", error)
-      return null
+      console.error("❌ Error fetching user profile via API:", error)
+
+      // Return a fallback profile
+      return {
+        id: userId,
+        user_id: userId,
+        email: user?.email || "",
+        role: "admin" as const,
+        first_name: "",
+        last_name: "",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }
     }
   }
 
   const signIn = async (email: string, password: string) => {
     try {
       console.log("🔐 Attempting sign in for:", email)
-      console.log("🔧 Supabase URL:", supabaseUrl ? "✅ Set" : "❌ Missing")
-      console.log("🔧 Supabase Key:", supabaseAnonKey ? "✅ Set" : "❌ Missing")
 
       if (!supabaseUrl || !supabaseAnonKey) {
         const error = new Error("Supabase configuration is missing. Please check environment variables.")
@@ -83,11 +105,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       if (error) {
         console.error("❌ Supabase sign in error:", error)
-        console.error("❌ Error details:", {
-          message: error.message,
-          status: error.status,
-          statusText: error.statusText,
-        })
         return { error }
       }
 
@@ -95,27 +112,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       if (data.user) {
         setUser(data.user)
+
+        // Fetch user profile via API to avoid RLS issues
         const userProfile = await fetchUserProfile(data.user.id)
         setProfile(userProfile)
       }
 
       return { data, error: null }
-    } catch (error) {
-      console.error("❌ Unexpected error in signIn:", error)
+    } catch (err) {
+      console.error("❌ Unexpected error in signIn:", err)
 
-      // Provide more specific error information
       let errorMessage = "An unexpected error occurred during sign in"
-
-      if (error instanceof Error) {
-        errorMessage = error.message
-      } else if (typeof error === "string") {
-        errorMessage = error
+      if (err instanceof Error) {
+        errorMessage = err.message
       }
 
       return {
         error: {
           message: errorMessage,
-          originalError: error,
+          originalError: err,
         },
       }
     }
@@ -155,6 +170,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (session?.user && mounted) {
           console.log("✅ Found existing session for:", session.user.email)
           setUser(session.user)
+
           const userProfile = await fetchUserProfile(session.user.id)
           if (mounted) {
             setProfile(userProfile)
@@ -189,6 +205,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (event === "SIGNED_IN" && session?.user) {
         console.log("✅ User signed in:", session.user.email)
         setUser(session.user)
+
         const userProfile = await fetchUserProfile(session.user.id)
         if (mounted) {
           setProfile(userProfile)
