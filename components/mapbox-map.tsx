@@ -479,7 +479,15 @@ export function MapboxMap({
     setIsOptimizing(true)
 
     try {
+      console.log(`🚀 Starting route optimization for ${processedOrders.length} orders`)
+
       const validOrders = processedOrders.filter((order) => order.coordinates)
+
+      if (validOrders.length < 2) {
+        throw new Error("Not enough orders with valid coordinates")
+      }
+
+      console.log(`📍 Found ${validOrders.length} orders with coordinates`)
 
       const waypoints = validOrders.map((order, index) => ({
         coordinates: order.coordinates!,
@@ -495,28 +503,57 @@ export function MapboxMap({
         })
       }
 
+      console.log(`🎯 Optimizing route with ${waypoints.length} waypoints`)
+
+      const requestBody = {
+        waypoints,
+        options: {
+          profile: "driving",
+          source: "first",
+          destination: "last",
+          roundtrip: false,
+        },
+      }
+
+      console.log("📤 Sending optimization request:", JSON.stringify(requestBody, null, 2))
+
       const response = await fetch("/api/optimize-route", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ waypoints }),
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify(requestBody),
       })
 
+      console.log(`📥 Response status: ${response.status}`)
+
       if (!response.ok) {
-        throw new Error("Route optimization failed")
+        const errorText = await response.text()
+        console.error("❌ API response error:", errorText)
+        throw new Error(`API returned ${response.status}: ${errorText}`)
       }
 
       const result = await response.json()
+      console.log("✅ Optimization result:", result)
+
+      if (!result.success || !result.data) {
+        throw new Error(result.error || "Invalid response format")
+      }
+
       setOptimizedRoute(result.data)
 
       toast({
-        title: "Route Optimized!",
+        title: "Route Optimized Successfully!",
         description: `Distance: ${(result.data.distance / 1000).toFixed(1)}km, Time: ${Math.round(result.data.duration / 60)}min`,
       })
     } catch (error) {
-      console.error("Route optimization error:", error)
+      console.error("❌ Route optimization error:", error)
+      const errorMessage = error instanceof Error ? error.message : "Unknown error occurred"
+
       toast({
-        title: "Optimization Failed",
-        description: "Could not optimize route. Please try again.",
+        title: "Route Optimization Failed",
+        description: `Error: ${errorMessage}. Please check your Mapbox configuration.`,
         variant: "destructive",
       })
     } finally {

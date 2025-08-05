@@ -14,23 +14,61 @@ interface ParsedOrder {
 
 export async function POST(request: NextRequest) {
   try {
+    console.log("📁 Starting file upload process...")
+
     const formData = await request.formData()
     const file = formData.get("file") as File
     const adminId = formData.get("adminId") as string
 
     if (!file) {
+      console.log("❌ No file provided")
       return NextResponse.json({ error: "No file provided" }, { status: 400 })
     }
 
     if (!adminId) {
+      console.log("❌ No admin ID provided")
       return NextResponse.json({ error: "Admin ID required" }, { status: 400 })
     }
 
     console.log("📁 Processing file:", file.name, "Size:", file.size, "Type:", file.type)
 
-    // Read file content
-    const fileContent = await file.text()
-    console.log("📄 File content preview:", fileContent.substring(0, 200))
+    // Validate file type
+    const allowedTypes = [
+      "text/csv",
+      "application/vnd.ms-excel",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ]
+    if (!allowedTypes.includes(file.type) && !file.name.toLowerCase().endsWith(".csv")) {
+      console.log("❌ Invalid file type:", file.type)
+      return NextResponse.json(
+        {
+          error: "Invalid file type. Please upload a CSV file.",
+          debug: { fileType: file.type, fileName: file.name },
+        },
+        { status: 400 },
+      )
+    }
+
+    // Read file content with error handling
+    let fileContent: string
+    try {
+      fileContent = await file.text()
+      console.log("📄 File content length:", fileContent.length)
+    } catch (error) {
+      console.error("❌ Error reading file:", error)
+      return NextResponse.json(
+        {
+          error: "Failed to read file content. Please ensure the file is not corrupted.",
+          debug: error instanceof Error ? error.message : "Unknown file read error",
+        },
+        { status: 400 },
+      )
+    }
+
+    if (!fileContent.trim()) {
+      console.log("❌ Empty file")
+      return NextResponse.json({ error: "File is empty" }, { status: 400 })
+    }
 
     // Parse CSV with better error handling
     const lines = fileContent.split(/\r?\n/).filter((line) => line.trim())
@@ -40,7 +78,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           error: "File must contain at least a header row and one data row",
-          debug: { linesFound: lines.length, preview: lines },
+          debug: { linesFound: lines.length, preview: lines.slice(0, 3) },
         },
         { status: 400 },
       )
@@ -48,14 +86,25 @@ export async function POST(request: NextRequest) {
 
     // Parse header
     const headerLine = lines[0]
-    const headers = parseCSVLine(headerLine)
-    console.log("📋 Headers found:", headers)
+    let headers: string[]
+    try {
+      headers = parseCSVLine(headerLine)
+      console.log("📋 Headers found:", headers)
+    } catch (error) {
+      console.error("❌ Error parsing header:", error)
+      return NextResponse.json(
+        {
+          error: "Failed to parse CSV header row",
+          debug: { headerLine, error: error instanceof Error ? error.message : "Unknown parse error" },
+        },
+        { status: 400 },
+      )
+    }
 
     // Validate required headers
     const requiredHeaders = ["order_number", "customer_name", "pickup_address", "delivery_address"]
-    const missingHeaders = requiredHeaders.filter(
-      (header) => !headers.some((h) => h.toLowerCase().includes(header.toLowerCase())),
-    )
+    const headerMap = createHeaderMapping(headers)
+    const missingHeaders = requiredHeaders.filter((header) => !(header in headerMap))
 
     if (missingHeaders.length > 0) {
       return NextResponse.json(
@@ -65,14 +114,13 @@ export async function POST(request: NextRequest) {
             foundHeaders: headers,
             requiredHeaders,
             missingHeaders,
+            headerMap,
           },
         },
         { status: 400 },
       )
     }
 
-    // Create header mapping
-    const headerMap = createHeaderMapping(headers)
     console.log("🗺️ Header mapping:", headerMap)
 
     // Parse data rows
@@ -85,11 +133,9 @@ export async function POST(request: NextRequest) {
 
       try {
         const values = parseCSVLine(line)
-        console.log(`📝 Row ${i} values:`, values)
 
-        if (values.length < headers.length) {
-          validationErrors.push(`Row ${i}: Expected ${headers.length} columns, got ${values.length}`)
-          continue
+        if (values.length === 0) {
+          continue // Skip empty rows
         }
 
         const order: ParsedOrder = {
@@ -103,9 +149,14 @@ export async function POST(request: NextRequest) {
           delivery_notes: getValueByHeader(values, headerMap, "delivery_notes") || undefined,
         }
 
-        // Add better validation for required fields
-        const requiredFields = ["order_number", "customer_name", "pickup_address", "delivery_address"]
-        const missingFields = requiredFields.filter((field) => !order[field] || order[field].trim() === "")
+        // Validate required fields
+        const requiredFields: (keyof ParsedOrder)[] = [
+          "order_number",
+          "customer_name",
+          "pickup_address",
+          "delivery_address",
+        ]
+        const missingFields = requiredFields.filter((field) => !order[field] || (order[field] as string).trim() === "")
 
         if (missingFields.length > 0) {
           validationErrors.push(`Row ${i}: Missing required fields: ${missingFields.join(", ")}`)
@@ -122,11 +173,21 @@ export async function POST(request: NextRequest) {
           order.priority = normalizedPriority
         }
 
-        // Validate and format phone number
+        // Validate email format if provided
+        if (order.customer_email) {
+          const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+          if (!emailRegex.test(order.customer_email)) {
+            console.warn(`Row ${i}: Invalid email format: ${order.customer_email}`)
+            // Don't fail, just warn
+          }
+        }
+
+        // Validate phone format if provided
         if (order.customer_phone) {
-          const phoneRegex = /^(\+?1[-.\s]?)?$$?([0-9]{3})$$?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})$/
-          if (!phoneRegex.test(order.customer_phone)) {
+          const phoneRegex = /^(\+?1[-.\s]?)?($$?[0-9]{3}$$?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4})$/
+          if (!phoneRegex.test(order.customer_phone.replace(/\s/g, ""))) {
             console.warn(`Row ${i}: Invalid phone format: ${order.customer_phone}`)
+            // Don't fail, just warn
           }
         }
 
@@ -147,7 +208,7 @@ export async function POST(request: NextRequest) {
           debug: {
             totalRows: lines.length - 1,
             validOrders: validOrders.length,
-            validationErrors: validationErrors.slice(0, 10), // Limit errors shown
+            validationErrors: validationErrors.slice(0, 10),
             headerMap,
             sampleRow: lines[1] ? parseCSVLine(lines[1]) : null,
           },
@@ -177,6 +238,8 @@ export async function POST(request: NextRequest) {
           debug: {
             supabaseError: error.message,
             validOrders: validOrders.length,
+            errorCode: error.code,
+            errorDetails: error.details,
           },
         },
         { status: 500 },
@@ -193,10 +256,16 @@ export async function POST(request: NextRequest) {
     })
   } catch (error) {
     console.error("❌ Upload processing error:", error)
+
+    // Always return JSON, never let it fall through to default error handling
     return NextResponse.json(
       {
         error: "Failed to process upload",
-        debug: error instanceof Error ? error.message : "Unknown error",
+        debug: {
+          message: error instanceof Error ? error.message : "Unknown error",
+          stack: error instanceof Error ? error.stack : undefined,
+          type: typeof error,
+        },
       },
       { status: 500 },
     )
@@ -242,7 +311,7 @@ function createHeaderMapping(headers: string[]): Record<string, number> {
     const cleanHeader = header.toLowerCase().replace(/[^a-z0-9]/g, "_")
 
     // Map common variations
-    if (cleanHeader.includes("order") && cleanHeader.includes("number")) {
+    if (cleanHeader.includes("order") && (cleanHeader.includes("number") || cleanHeader.includes("id"))) {
       mapping.order_number = index
     } else if (cleanHeader.includes("customer") && cleanHeader.includes("name")) {
       mapping.customer_name = index
@@ -258,8 +327,28 @@ function createHeaderMapping(headers: string[]): Record<string, number> {
       mapping.priority = index
     } else if (cleanHeader.includes("delivery") && cleanHeader.includes("notes")) {
       mapping.delivery_notes = index
-    } else if (cleanHeader.includes("notes")) {
+    } else if (cleanHeader.includes("notes") && !cleanHeader.includes("delivery")) {
       mapping.delivery_notes = index
+    }
+
+    // Additional mappings for common variations
+    if (cleanHeader === "order_no" || cleanHeader === "order_id") {
+      mapping.order_number = index
+    }
+    if (cleanHeader === "name" || cleanHeader === "customer") {
+      mapping.customer_name = index
+    }
+    if (cleanHeader === "phone" || cleanHeader === "phone_number") {
+      mapping.customer_phone = index
+    }
+    if (cleanHeader === "email" || cleanHeader === "email_address") {
+      mapping.customer_email = index
+    }
+    if (cleanHeader === "pickup" || cleanHeader === "origin") {
+      mapping.pickup_address = index
+    }
+    if (cleanHeader === "delivery" || cleanHeader === "destination" || cleanHeader === "address") {
+      mapping.delivery_address = index
     }
   })
 

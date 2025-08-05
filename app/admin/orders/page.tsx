@@ -2,14 +2,17 @@
 
 import { useState, useEffect, useMemo, useRef } from "react"
 import { useRouter } from "next/navigation"
-import { Card, CardContent } from "@/components/ui/card"
+import { DashboardLayout } from "@/components/dashboard-layout"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
+import { Checkbox } from "@/components/ui/checkbox"
 import { useToast } from "@/components/ui/use-toast"
 import { useAuth } from "@/contexts/auth-context"
 import { supabase } from "@/lib/supabase"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,33 +23,41 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Checkbox } from "@/components/ui/checkbox"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog"
 import {
   Package,
   Search,
+  Download,
+  Upload,
   Trash2,
   UserPlus,
   RefreshCw,
   CheckCircle,
   Clock,
   AlertCircle,
+  MoreHorizontal,
+  Eye,
+  Edit,
+  MapPin,
   Printer,
-  Route,
-  Zap,
-  Target,
-  Settings,
-  Map,
+  FileText,
 } from "lucide-react"
-import { RouteOptimizationPanel } from "@/components/route-optimization-panel"
-import { OptimizedRoutesDisplay } from "@/components/optimized-routes-display"
+import { MapboxMap } from "@/components/mapbox-map"
+import { OrderTemplateGenerator } from "@/components/order-template-generator"
+import { geocodingService } from "@/lib/geocoding-service"
 
 interface Order {
   id: string
   order_number: string
   customer_name: string
   customer_email: string
-  customer_phone?: string
   delivery_address: string
   priority: "urgent" | "high" | "normal" | "low"
   status: string
@@ -61,11 +72,6 @@ interface Order {
   shopify_order_id?: string
   shopify_order_number?: string
   coordinates?: [number, number]
-  route_number?: number
-  stop_number?: number
-  estimated_arrival?: string
-  zone?: string
-  postal_code?: string
 }
 
 interface Driver {
@@ -77,6 +83,21 @@ interface Driver {
   status: string
   created_by: string
   admin_id?: string
+}
+
+interface OptimizationSettings {
+  warehouseLocation: [number, number]
+  warehouseName: string
+  maxOrdersPerRoute: number
+  optimizationMethod: "distance" | "time" | "hybrid"
+  considerTraffic: boolean
+  considerPriority: boolean
+  considerTimeWindows: boolean
+  vehicleCapacity: number
+  workingHours: {
+    start: string
+    end: string
+  }
 }
 
 export default function OrdersPage() {
@@ -94,14 +115,28 @@ export default function OrdersPage() {
   const [statusFilter, setStatusFilter] = useState("all")
   const [priorityFilter, setPriorityFilter] = useState("all")
   const [selectedOrders, setSelectedOrders] = useState<Set<string>>(new Set())
-  const [activeTab, setActiveTab] = useState("orders")
+  const [activeTab, setActiveTab] = useState("all")
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const [showImportDialog, setShowImportDialog] = useState(false)
   const [isGeocodingOrders, setIsGeocodingOrders] = useState(false)
   const [isImporting, setIsImporting] = useState(false)
   const [importFile, setImportFile] = useState<File | null>(null)
-  const [optimizationResult, setOptimizationResult] = useState<any>(null)
-  const [isGeneratingLabels, setIsGeneratingLabels] = useState(false)
+
+  // Optimization settings with Toronto warehouse as default
+  const [optimizationSettings, setOptimizationSettings] = useState<OptimizationSettings>({
+    warehouseLocation: [43.6532, -79.3832], // Toronto downtown
+    warehouseName: "Main Warehouse",
+    maxOrdersPerRoute: 12,
+    optimizationMethod: "hybrid",
+    considerTraffic: true,
+    considerPriority: true,
+    considerTimeWindows: true,
+    vehicleCapacity: 50,
+    workingHours: {
+      start: "08:00",
+      end: "18:00",
+    },
+  })
 
   // Fetch data
   useEffect(() => {
@@ -192,6 +227,62 @@ export default function OrdersPage() {
     }
   }
 
+  // Geocode all orders that don't have coordinates
+  const geocodeAllOrders = async () => {
+    if (isGeocodingOrders) return
+
+    const ordersNeedingGeocode = orders.filter((order) => !order.coordinates && order.delivery_address)
+    if (ordersNeedingGeocode.length === 0) {
+      toast({
+        title: "All Orders Geocoded",
+        description: "All orders already have coordinates.",
+      })
+      return
+    }
+
+    setIsGeocodingOrders(true)
+
+    try {
+      console.log(`🔍 Geocoding ${ordersNeedingGeocode.length} orders...`)
+
+      const addresses = ordersNeedingGeocode.map((order) => order.delivery_address)
+      const geocodingResults = await geocodingService.geocodeBatch(addresses)
+
+      // Update orders with geocoded coordinates
+      const updatedOrders = orders.map((order) => {
+        if (order.coordinates) return order
+
+        const geocodingResult = geocodingResults.find((result) => result.address === order.delivery_address)
+        if (geocodingResult && geocodingResult.coordinates) {
+          return {
+            ...order,
+            coordinates: geocodingResult.coordinates,
+          }
+        }
+        return order
+      })
+
+      setOrders(updatedOrders)
+
+      const successCount = geocodingResults.filter((r) => r.coordinates).length
+      const cachedCount = geocodingResults.filter((r) => r.fromCache).length
+
+      toast({
+        title: "Geocoding Complete",
+        description: `Successfully geocoded ${successCount}/${ordersNeedingGeocode.length} addresses (${cachedCount} from cache)`,
+      })
+    } catch (error) {
+      console.error("❌ Geocoding error:", error)
+      toast({
+        title: "Geocoding Failed",
+        description: "Some addresses could not be geocoded.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsGeocodingOrders(false)
+    }
+  }
+
   // Handle file import
   const handleFileImport = async () => {
     if (!importFile || !profile) {
@@ -210,21 +301,54 @@ export default function OrdersPage() {
       formData.append("file", importFile)
       formData.append("adminId", profile.user_id)
 
+      console.log("📤 Uploading file:", importFile.name)
+
       const response = await fetch("/api/upload-orders", {
         method: "POST",
         body: formData,
       })
 
-      const result = await response.json()
+      console.log("📥 Response status:", response.status, response.statusText)
+
+      // Check if response is JSON
+      const contentType = response.headers.get("content-type")
+      let result: any
+
+      if (contentType && contentType.includes("application/json")) {
+        try {
+          result = await response.json()
+        } catch (jsonError) {
+          console.error("❌ JSON parse error:", jsonError)
+          throw new Error("Server returned invalid JSON response")
+        }
+      } else {
+        // Handle non-JSON responses (likely HTML error pages)
+        const textResponse = await response.text()
+        console.error("❌ Non-JSON response:", textResponse.substring(0, 200))
+        throw new Error(`Server error: ${response.status} ${response.statusText}`)
+      }
 
       if (!response.ok) {
-        throw new Error(result.error || "Import failed")
+        console.error("❌ Upload failed:", result)
+        throw new Error(result.error || `Upload failed with status ${response.status}`)
       }
+
+      console.log("✅ Upload successful:", result)
 
       toast({
         title: "Import Successful",
         description: `Successfully imported ${result.imported} orders out of ${result.total_processed} processed.`,
       })
+
+      // Show validation errors if any
+      if (result.validation_errors && result.validation_errors.length > 0) {
+        console.warn("⚠️ Validation errors:", result.validation_errors)
+        toast({
+          title: "Import Warning",
+          description: `${result.validation_errors.length} rows had validation errors. Check console for details.`,
+          variant: "destructive",
+        })
+      }
 
       // Refresh orders list
       await fetchOrders()
@@ -237,37 +361,12 @@ export default function OrdersPage() {
       console.error("❌ Import error:", error)
       toast({
         title: "Import Failed",
-        description: error instanceof Error ? error.message : "Failed to import orders.",
+        description: error instanceof Error ? error.message : "Failed to import orders. Please try again.",
         variant: "destructive",
       })
     } finally {
       setIsImporting(false)
     }
-  }
-
-  // Handle optimization completion
-  const handleOptimizationComplete = (result: any) => {
-    setOptimizationResult(result)
-    setActiveTab("routes")
-
-    // Update orders with route assignments
-    const updatedOrders = orders.map((order) => {
-      const routeOrder = result.routes?.flatMap((route: any) => route.orders).find((ro: any) => ro.id === order.id)
-
-      if (routeOrder) {
-        return {
-          ...order,
-          route_number: routeOrder.route_number,
-          stop_number: routeOrder.stop_number,
-          estimated_arrival: routeOrder.estimated_arrival,
-          zone: routeOrder.zone,
-        }
-      }
-      return order
-    })
-
-    setOrders(updatedOrders)
-    setSelectedOrders(new Set()) // Clear selection after optimization
   }
 
   // Filter orders based on search and filters
@@ -361,6 +460,7 @@ export default function OrdersPage() {
       for (const orderId of selectedOrderIds) {
         const updateData: any = { status: newStatus }
 
+        // Add completion timestamp if status is delivered
         if (newStatus === "delivered") {
           updateData.completed_at = new Date().toISOString()
         }
@@ -420,10 +520,10 @@ export default function OrdersPage() {
       selectedOrders.size > 0 ? filteredOrders.filter((order) => selectedOrders.has(order.id)) : filteredOrders
 
     const csv = [
-      "Order Number,Customer Name,Email,Phone,Address,Priority,Status,Route,Stop,Zone,Created At,Coordinates",
+      "Order Number,Customer Name,Email,Address,Priority,Status,Created At,Coordinates",
       ...selectedOrdersList.map(
         (order) =>
-          `${order.order_number},${order.customer_name},${order.customer_email || ""},${order.customer_phone || ""},"${order.delivery_address}",${order.priority},${order.status},${order.route_number || ""},${order.stop_number || ""},${order.zone || ""},${order.created_at},"${order.coordinates ? `${order.coordinates[0]},${order.coordinates[1]}` : ""}"`,
+          `${order.order_number},${order.customer_name},${order.customer_email},"${order.delivery_address}",${order.priority},${order.status},${order.created_at},"${order.coordinates ? `${order.coordinates[0]},${order.coordinates[1]}` : ""}"`,
       ),
     ].join("\n")
 
@@ -434,6 +534,14 @@ export default function OrdersPage() {
     a.download = `orders-${new Date().toISOString().split("T")[0]}.csv`
     a.click()
     window.URL.revokeObjectURL(url)
+  }
+
+  // Get order counts for tabs
+  const orderCounts = {
+    all: orders.length,
+    active: orders.filter((o) => ["pending", "assigned", "in_transit"].includes(o.status)).length,
+    completed: orders.filter((o) => o.status === "delivered").length,
+    failed: orders.filter((o) => o.status === "failed").length,
   }
 
   const getStatusBadge = (status: string) => {
@@ -471,414 +579,425 @@ export default function OrdersPage() {
     )
   }
 
-  const getStoreBadge = (order: Order) => {
-    if (order.shopify_order_id) {
-      return (
-        <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200">
-          Shopify
-        </Badge>
-      )
-    }
-    return (
-      <Badge variant="outline" className="bg-gray-50 text-gray-700 border-gray-200">
-        Manual
-      </Badge>
-    )
-  }
+  // Prepare orders for map display
+  const ordersForMap = filteredOrders.map((order) => ({
+    id: order.id,
+    order_number: order.order_number,
+    customer_name: order.customer_name,
+    delivery_address: order.delivery_address,
+    priority: order.priority || "normal",
+    status: order.status,
+    coordinates: order.coordinates,
+  }))
 
   if (!profile) return null
 
   return (
-    <div className="min-h-screen bg-slate-900 text-white">
-      <div className="flex">
-        {/* Sidebar */}
-        <div className="w-64 bg-slate-800 min-h-screen p-4">
-          <div className="flex items-center gap-2 mb-8">
-            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
-              <Package className="h-5 w-5 text-white" />
-            </div>
-            <span className="text-xl font-bold">DeliveryOS</span>
+    <DashboardLayout>
+      <div className="space-y-6">
+        {/* Header */}
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold">Orders Management</h1>
+            <p className="text-muted-foreground">Manage and track all delivery orders with real-time geocoding</p>
           </div>
-
-          <nav className="space-y-2">
-            <div className="flex items-center gap-3 px-3 py-2 rounded-lg bg-slate-700 text-blue-400">
-              <Package className="h-5 w-5" />
-              <span>Dashboard</span>
-            </div>
-            <div className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-700 cursor-pointer">
-              <Route className="h-5 w-5" />
-              <span>Dispatch</span>
-            </div>
-            <div className="flex items-center gap-3 px-3 py-2 rounded-lg bg-blue-600 text-white">
-              <Package className="h-5 w-5" />
-              <span>Orders</span>
-            </div>
-            <div className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-700 cursor-pointer">
-              <UserPlus className="h-5 w-5" />
-              <span>Drivers</span>
-            </div>
-            <div className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-700 cursor-pointer">
-              <Settings className="h-5 w-5" />
-              <span>Integrations</span>
-            </div>
-          </nav>
-
-          <div className="absolute bottom-4 left-4">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center text-sm font-medium">
-                A
-              </div>
-              <div>
-                <div className="text-sm font-medium">Adi negi</div>
-                <div className="text-xs text-slate-400">Admin</div>
-              </div>
-            </div>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={exportOrders}>
+              <Download className="h-4 w-4 mr-2" />
+              Export
+            </Button>
+            <Dialog open={showImportDialog} onOpenChange={setShowImportDialog}>
+              <DialogTrigger asChild>
+                <Button variant="outline">
+                  <Upload className="h-4 w-4 mr-2" />
+                  Import
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="max-w-4xl">
+                <DialogHeader>
+                  <DialogTitle>Import Orders</DialogTitle>
+                  <DialogDescription>
+                    Upload a CSV file with order data. Download the template below for the correct format.
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium mb-2">Select CSV File</label>
+                      <Input
+                        ref={fileInputRef}
+                        type="file"
+                        accept=".csv,.xlsx,.xls"
+                        onChange={(e) => setImportFile(e.target.files?.[0] || null)}
+                        disabled={isImporting}
+                      />
+                    </div>
+                    {importFile && (
+                      <div className="p-3 bg-blue-50 rounded-lg">
+                        <p className="text-sm text-blue-800">
+                          <FileText className="h-4 w-4 inline mr-1" />
+                          Selected: {importFile.name} ({(importFile.size / 1024).toFixed(1)} KB)
+                        </p>
+                      </div>
+                    )}
+                    <div className="flex gap-2">
+                      <Button onClick={handleFileImport} disabled={!importFile || isImporting} className="flex-1">
+                        {isImporting ? (
+                          <>
+                            <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                            Importing...
+                          </>
+                        ) : (
+                          <>
+                            <Upload className="h-4 w-4 mr-2" />
+                            Import Orders
+                          </>
+                        )}
+                      </Button>
+                      <Button variant="outline" onClick={() => setShowImportDialog(false)}>
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                  <div>
+                    <OrderTemplateGenerator />
+                  </div>
+                </div>
+              </DialogContent>
+            </Dialog>
+            <Button variant="outline" onClick={geocodeAllOrders} disabled={isGeocodingOrders}>
+              <MapPin className={`h-4 w-4 mr-2 ${isGeocodingOrders ? "animate-spin" : ""}`} />
+              {isGeocodingOrders ? "Geocoding..." : "Geocode All"}
+            </Button>
+            <Button onClick={fetchOrders} disabled={loading}>
+              <RefreshCw className={`h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
           </div>
         </div>
 
-        {/* Main Content */}
-        <div className="flex-1 p-6">
-          <div className="mb-6">
-            <h1 className="text-2xl font-bold mb-2">Enhanced Orders Management</h1>
-            <p className="text-slate-400">Advanced route optimization with real-time geocoding and enhanced labeling</p>
+        {/* Driver Status Alert */}
+        {driversLoading ? (
+          <Card className="border-blue-200 bg-blue-50">
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2">
+                <RefreshCw className="h-5 w-5 text-blue-600 animate-spin" />
+                <div>
+                  <h3 className="font-medium text-blue-800">Loading Drivers...</h3>
+                  <p className="text-sm text-blue-700">Fetching available drivers for order assignment.</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        ) : drivers.length > 0 ? (
+          <Card className="border-green-200 bg-green-50">
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2">
+                <CheckCircle className="h-5 w-5 text-green-600" />
+                <div>
+                  <h3 className="font-medium text-green-800">Drivers Available</h3>
+                  <p className="text-sm text-green-700">
+                    {drivers.length} driver{drivers.length !== 1 ? "s" : ""} ready to receive order assignments.
+                  </p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        ) : (
+          <Card className="border-orange-200 bg-orange-50">
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="h-5 w-5 text-orange-600" />
+                <div>
+                  <h3 className="font-medium text-orange-800">No Drivers Available</h3>
+                  <p className="text-sm text-orange-700">
+                    No drivers found. Please add drivers before assigning orders.
+                  </p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Search and Filters */}
+        <div className="flex flex-col sm:flex-row gap-4">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search orders by number, customer, or address..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="pl-10"
+            />
           </div>
+          <Select value={statusFilter} onValueChange={setStatusFilter}>
+            <SelectTrigger className="w-[180px]">
+              <SelectValue placeholder="All Statuses" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Statuses</SelectItem>
+              <SelectItem value="pending">Pending</SelectItem>
+              <SelectItem value="assigned">Assigned</SelectItem>
+              <SelectItem value="in_transit">In Transit</SelectItem>
+              <SelectItem value="delivered">Delivered</SelectItem>
+              <SelectItem value="failed">Failed</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select value={priorityFilter} onValueChange={setPriorityFilter}>
+            <SelectTrigger className="w-[180px]">
+              <SelectValue placeholder="All Priorities" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Priorities</SelectItem>
+              <SelectItem value="urgent">Urgent</SelectItem>
+              <SelectItem value="high">High</SelectItem>
+              <SelectItem value="normal">Normal</SelectItem>
+              <SelectItem value="low">Low</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
 
-          {/* Driver Status Alert */}
-          {driversLoading ? (
-            <Card className="border-blue-200 bg-blue-50 mb-6">
-              <CardContent className="p-4">
-                <div className="flex items-center gap-2">
-                  <RefreshCw className="h-5 w-5 text-blue-600 animate-spin" />
-                  <div>
-                    <h3 className="font-medium text-blue-800">Loading Drivers...</h3>
-                    <p className="text-sm text-blue-700">Fetching available drivers for order assignment.</p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          ) : drivers.length > 0 ? (
-            <Card className="border-green-200 bg-green-900/20 mb-6">
-              <CardContent className="p-4">
-                <div className="flex items-center gap-2">
-                  <CheckCircle className="h-5 w-5 text-green-400" />
-                  <div>
-                    <h3 className="font-medium text-green-300">Drivers Available</h3>
-                    <p className="text-sm text-green-400">
-                      {drivers.length} driver{drivers.length !== 1 ? "s" : ""} ready to receive optimized route
-                      assignments.
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          ) : (
-            <Card className="border-orange-200 bg-orange-900/20 mb-6">
-              <CardContent className="p-4">
-                <div className="flex items-center gap-2">
-                  <AlertCircle className="h-5 w-5 text-orange-400" />
-                  <div>
-                    <h3 className="font-medium text-orange-300">No Drivers Available</h3>
-                    <p className="text-sm text-orange-400">
-                      No drivers found. Please add drivers before optimizing and assigning routes.
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
+        {/* Tabs */}
+        <div className="flex space-x-1 bg-muted p-1 rounded-lg w-fit">
+          {[
+            { key: "all", label: "All", count: orderCounts.all },
+            { key: "active", label: "Active", count: orderCounts.active },
+            { key: "completed", label: "Completed", count: orderCounts.completed },
+            { key: "failed", label: "Failed", count: orderCounts.failed },
+          ].map((tab) => (
+            <Button
+              key={tab.key}
+              variant={activeTab === tab.key ? "default" : "ghost"}
+              size="sm"
+              onClick={() => setActiveTab(tab.key)}
+              className="flex items-center gap-2"
+            >
+              {tab.label}
+              <Badge variant="secondary" className="text-xs">
+                {tab.count}
+              </Badge>
+            </Button>
+          ))}
+        </div>
 
-          {/* Search and Filters */}
-          <div className="flex flex-col sm:flex-row gap-4 mb-6">
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-slate-400" />
-              <Input
-                placeholder="Search orders by number, customer, or address..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="pl-10 bg-slate-800 border-slate-700 text-white placeholder:text-slate-400"
-              />
-            </div>
-            <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="w-[180px] bg-slate-800 border-slate-700 text-white">
-                <SelectValue placeholder="All Statuses" />
-              </SelectTrigger>
-              <SelectContent className="bg-slate-800 border-slate-700">
-                <SelectItem value="all">All Statuses</SelectItem>
-                <SelectItem value="pending">Pending</SelectItem>
-                <SelectItem value="assigned">Assigned</SelectItem>
-                <SelectItem value="in_transit">In Transit</SelectItem>
-                <SelectItem value="delivered">Delivered</SelectItem>
-                <SelectItem value="failed">Failed</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select value={priorityFilter} onValueChange={setPriorityFilter}>
-              <SelectTrigger className="w-[180px] bg-slate-800 border-slate-700 text-white">
-                <SelectValue placeholder="All Priorities" />
-              </SelectTrigger>
-              <SelectContent className="bg-slate-800 border-slate-700">
-                <SelectItem value="all">All Priorities</SelectItem>
-                <SelectItem value="urgent">Urgent</SelectItem>
-                <SelectItem value="high">High</SelectItem>
-                <SelectItem value="normal">Normal</SelectItem>
-                <SelectItem value="low">Low</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          {/* Bulk Actions Toolbar */}
-          {selectedOrders.size > 0 && (
-            <Card className="border-blue-200 bg-blue-900/20 mb-6">
-              <CardContent className="p-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-4">
-                    <span className="text-sm font-medium text-blue-300">{selectedOrders.size} orders selected</span>
-                    <div className="flex gap-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="bg-blue-600 hover:bg-blue-700 text-white border-blue-500"
-                      >
-                        <UserPlus className="h-4 w-4 mr-2" />
-                        Assign Driver
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="bg-slate-700 hover:bg-slate-600 text-white border-slate-600"
-                      >
-                        <Package className="h-4 w-4 mr-2" />
-                        Change Status
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="bg-slate-700 hover:bg-slate-600 text-white border-slate-600"
-                      >
-                        <Printer className="h-4 w-4 mr-2" />
-                        Enhanced Labels
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="bg-red-600 hover:bg-red-700 text-white border-red-500"
-                      >
-                        <Trash2 className="h-4 w-4 mr-2" />
-                        Delete
-                      </Button>
-                    </div>
-                  </div>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setSelectedOrders(new Set())}
-                    className="text-slate-400 hover:text-white"
-                  >
-                    Clear Selection
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-
-          {/* Enhanced Tabs */}
-          <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-            <TabsList className="grid w-full grid-cols-4 bg-slate-800 border-slate-700">
-              <TabsTrigger
-                value="orders"
-                className="flex items-center gap-2 data-[state=active]:bg-blue-600 data-[state=active]:text-white"
-              >
-                <Package className="h-4 w-4" />
-                Orders ({filteredOrders.length})
-              </TabsTrigger>
-              <TabsTrigger
-                value="optimization"
-                className="flex items-center gap-2 data-[state=active]:bg-blue-600 data-[state=active]:text-white"
-              >
-                <Zap className="h-4 w-4" />
-                Optimization
-              </TabsTrigger>
-              <TabsTrigger
-                value="routes"
-                className="flex items-center gap-2 data-[state=active]:bg-blue-600 data-[state=active]:text-white"
-              >
-                <Route className="h-4 w-4" />
-                Routes {optimizationResult ? `(${optimizationResult.routes?.length || 0})` : ""}
-              </TabsTrigger>
-              <TabsTrigger
-                value="map"
-                className="flex items-center gap-2 data-[state=active]:bg-blue-600 data-[state=active]:text-white"
-              >
-                <Map className="h-4 w-4" />
-                Map View
-              </TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="orders" className="space-y-4">
-              {/* Orders Table */}
-              <Card className="bg-slate-800 border-slate-700">
-                <CardContent className="p-0">
-                  <div className="overflow-x-auto">
-                    <table className="w-full">
-                      <thead className="border-b border-slate-700">
-                        <tr>
-                          <th className="text-left p-4">
-                            <Checkbox
-                              checked={selectedOrders.size === filteredOrders.length && filteredOrders.length > 0}
-                              onCheckedChange={handleSelectAll}
-                              className="border-slate-600"
-                            />
-                          </th>
-                          <th className="text-left p-4 text-slate-300">Order</th>
-                          <th className="text-left p-4 text-slate-300">Customer</th>
-                          <th className="text-left p-4 text-slate-300">Store</th>
-                          <th className="text-left p-4 text-slate-300">Status</th>
-                          <th className="text-left p-4 text-slate-300">Priority</th>
-                          <th className="text-left p-4 text-slate-300">Driver</th>
-                          <th className="text-left p-4 text-slate-300">Created</th>
-                          <th className="text-left p-4 text-slate-300"></th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {filteredOrders.map((order) => (
-                          <tr key={order.id} className="border-b border-slate-700 hover:bg-slate-700/50">
-                            <td className="p-4">
-                              <Checkbox
-                                checked={selectedOrders.has(order.id)}
-                                onCheckedChange={(checked) => handleSelectOrder(order.id, !!checked)}
-                                className="border-slate-600"
-                              />
-                            </td>
-                            <td className="p-4">
-                              <div className="font-medium text-white">{order.order_number}</div>
-                              <div className="text-sm text-slate-400">{order.delivery_address.split(",")[0]}</div>
-                            </td>
-                            <td className="p-4">
-                              <div className="font-medium text-white">{order.customer_name}</div>
-                              <div className="text-sm text-slate-400 flex items-center gap-1">
-                                <span>📧</span>
-                                {order.customer_email}
-                              </div>
-                              {order.customer_phone && (
-                                <div className="text-sm text-slate-400 flex items-center gap-1">
-                                  <span>📞</span>
-                                  {order.customer_phone}
-                                </div>
-                              )}
-                            </td>
-                            <td className="p-4">{getStoreBadge(order)}</td>
-                            <td className="p-4">{getStatusBadge(order.status)}</td>
-                            <td className="p-4">{getPriorityBadge(order.priority)}</td>
-                            <td className="p-4">
-                              <div className="flex items-center gap-2">
-                                <span className="text-slate-400">👤</span>
-                                <span className="text-slate-300">Unassigned</span>
-                              </div>
-                            </td>
-                            <td className="p-4">
-                              <div className="flex items-center gap-1 text-slate-400">
-                                <span>📅</span>
-                                <span>{new Date(order.created_at).toLocaleDateString()}</span>
-                              </div>
-                            </td>
-                            <td className="p-4">
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => router.push(`/admin/orders/${order.id}`)}
-                                className="text-slate-400 hover:text-white"
-                              >
-                                •••
-                              </Button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </CardContent>
-              </Card>
-            </TabsContent>
-
-            <TabsContent value="optimization" className="space-y-4">
-              <RouteOptimizationPanel
-                selectedOrders={Array.from(selectedOrders)
-                  .map((id) => filteredOrders.find((o) => o.id === id)!)
-                  .filter(Boolean)}
-                adminId={profile.user_id}
-                onOptimizationComplete={handleOptimizationComplete}
-              />
-            </TabsContent>
-
-            <TabsContent value="routes" className="space-y-4">
-              {optimizationResult ? (
-                <OptimizedRoutesDisplay result={optimizationResult} adminId={profile.user_id} />
-              ) : (
-                <Card className="bg-slate-800 border-slate-700">
-                  <CardContent className="p-8 text-center">
-                    <div className="flex flex-col items-center gap-4">
-                      <div className="w-16 h-16 bg-blue-600/20 rounded-full flex items-center justify-center">
-                        <Route className="h-8 w-8 text-blue-400" />
-                      </div>
-                      <div>
-                        <h3 className="text-lg font-medium text-white">No Routes Optimized</h3>
-                        <p className="text-slate-400 mb-4">
-                          Select orders and run optimization to create efficient delivery routes.
-                        </p>
-                        <Button onClick={() => setActiveTab("optimization")} className="bg-blue-600 hover:bg-blue-700">
-                          <Zap className="h-4 w-4 mr-2" />
-                          Start Optimization
+        {/* Bulk Actions Toolbar */}
+        {selectedOrders.size > 0 && (
+          <Card className="border-blue-200 bg-blue-50">
+            <CardContent className="p-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <span className="text-sm font-medium text-blue-800">{selectedOrders.size} orders selected</span>
+                  <div className="flex gap-2">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button size="sm" variant="outline" disabled={drivers.length === 0}>
+                          <UserPlus className="h-4 w-4 mr-2" />
+                          Assign Driver {drivers.length === 0 && "(No drivers)"}
                         </Button>
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              )}
-            </TabsContent>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent>
+                        {drivers.length === 0 ? (
+                          <DropdownMenuItem disabled>No drivers available</DropdownMenuItem>
+                        ) : (
+                          drivers.map((driver) => (
+                            <DropdownMenuItem key={driver.user_id} onClick={() => handleBulkAssign(driver.user_id)}>
+                              <div className="flex flex-col">
+                                <span className="font-medium">{driver.name}</span>
+                                <span className="text-xs text-muted-foreground">{driver.email}</span>
+                              </div>
+                            </DropdownMenuItem>
+                          ))
+                        )}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
 
-            <TabsContent value="map" className="space-y-4">
-              <Card className="bg-slate-800 border-slate-700">
-                <CardContent className="p-8 text-center">
-                  <div className="flex flex-col items-center gap-4">
-                    <div className="w-16 h-16 bg-blue-600/20 rounded-full flex items-center justify-center">
-                      <Map className="h-8 w-8 text-blue-400" />
-                    </div>
-                    <div>
-                      <h3 className="text-lg font-medium text-white">Map View</h3>
-                      <p className="text-slate-400 mb-4">
-                        Interactive map showing optimized routes and delivery locations.
-                      </p>
-                      <Button className="bg-blue-600 hover:bg-blue-700">
-                        <Target className="h-4 w-4 mr-2" />
-                        View Map
-                      </Button>
-                    </div>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button size="sm" variant="outline">
+                          <Package className="h-4 w-4 mr-2" />
+                          Change Status
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent>
+                        <DropdownMenuItem onClick={() => handleBulkStatusChange("pending")}>Pending</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleBulkStatusChange("assigned")}>Assigned</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleBulkStatusChange("in_transit")}>
+                          In Transit
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleBulkStatusChange("delivered")}>
+                          Delivered
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+
+                    <Button size="sm" variant="outline">
+                      <Printer className="h-4 w-4 mr-2" />
+                      Print Labels
+                    </Button>
+
+                    <Button size="sm" variant="outline" onClick={() => setShowDeleteDialog(true)}>
+                      <Trash2 className="h-4 w-4 mr-2" />
+                      Delete
+                    </Button>
                   </div>
-                </CardContent>
-              </Card>
-            </TabsContent>
-          </Tabs>
+                </div>
+                <Button size="sm" variant="ghost" onClick={() => setSelectedOrders(new Set())}>
+                  Clear Selection
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Orders List and Map */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Orders List */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center justify-between">
+                <span>Orders ({filteredOrders.length})</span>
+                <Button variant="outline" size="sm" onClick={fetchOrders}>
+                  <RefreshCw className="h-4 w-4" />
+                </Button>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {loading ? (
+                <div className="flex items-center justify-center py-8">
+                  <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
+                </div>
+              ) : filteredOrders.length > 0 ? (
+                <div className="space-y-4">
+                  {/* Select All */}
+                  <div className="flex items-center gap-2 pb-2 border-b">
+                    <Checkbox
+                      checked={selectedOrders.size === filteredOrders.length && filteredOrders.length > 0}
+                      onCheckedChange={handleSelectAll}
+                    />
+                    <span className="text-sm font-medium">Select All</span>
+                  </div>
+
+                  {/* Orders */}
+                  <div className="max-h-[600px] overflow-y-auto space-y-3">
+                    {filteredOrders.map((order) => (
+                      <div
+                        key={order.id}
+                        className={`p-4 border rounded-lg transition-colors ${
+                          selectedOrders.has(order.id) ? "bg-blue-50 border-blue-200" : "hover:bg-gray-50"
+                        }`}
+                      >
+                        <div className="flex items-start gap-3">
+                          <Checkbox
+                            checked={selectedOrders.has(order.id)}
+                            onCheckedChange={(checked) => handleSelectOrder(order.id, checked as boolean)}
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between mb-2">
+                              <h4 className="font-medium text-sm">#{order.order_number}</h4>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button variant="ghost" size="sm">
+                                    <MoreHorizontal className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent>
+                                  <DropdownMenuItem onClick={() => router.push(`/admin/orders/${order.id}`)}>
+                                    <Eye className="h-4 w-4 mr-2" />
+                                    View Details
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem>
+                                    <Edit className="h-4 w-4 mr-2" />
+                                    Edit Order
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem>
+                                    <Printer className="h-4 w-4 mr-2" />
+                                    Print Label
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+
+                            <p className="text-sm text-muted-foreground mb-1">Customer: {order.customer_name}</p>
+                            <p className="text-xs text-muted-foreground mb-2">Address: {order.delivery_address}</p>
+
+                            <div className="flex items-center gap-2 mb-2">
+                              {getStatusBadge(order.status)}
+                              {getPriorityBadge(order.priority)}
+                              {order.coordinates && (
+                                <Badge variant="outline" className="bg-green-50 text-green-700">
+                                  <MapPin className="h-3 w-3 mr-1" />
+                                  Geocoded
+                                </Badge>
+                              )}
+                            </div>
+
+                            {order.driver_id && (
+                              <p className="text-xs text-muted-foreground">
+                                Driver: {drivers.find((d) => d.user_id === order.driver_id)?.name || "Unknown"}
+                              </p>
+                            )}
+
+                            <p className="text-xs text-muted-foreground">
+                              Created: {new Date(order.created_at).toLocaleDateString()}
+                            </p>
+
+                            {order.coordinates && (
+                              <p className="text-xs text-green-600 mt-1">
+                                📍 {order.coordinates[0].toFixed(6)}, {order.coordinates[1].toFixed(6)}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center py-8">
+                  <Package className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+                  <h3 className="text-lg font-medium text-gray-900 mb-2">No Orders Found</h3>
+                  <p className="text-gray-500">
+                    {searchTerm || statusFilter !== "all" || priorityFilter !== "all"
+                      ? "No orders match your current filters."
+                      : "No orders have been created yet."}
+                  </p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Map */}
+          <MapboxMap
+            orders={ordersForMap}
+            warehouseLocation={optimizationSettings.warehouseLocation}
+            warehouseName={optimizationSettings.warehouseName}
+            title="Orders Map with Real Geocoding"
+            height="600px"
+            showRouteOptimization={true}
+            onOrderClick={(orderId) => {
+              router.push(`/admin/orders/${orderId}`)
+            }}
+          />
         </div>
       </div>
 
       {/* Delete Confirmation Dialog */}
       <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
-        <AlertDialogContent className="bg-slate-800 border-slate-700 text-white">
+        <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete Orders</AlertDialogTitle>
-            <AlertDialogDescription className="text-slate-400">
+            <AlertDialogDescription>
               Are you sure you want to delete {selectedOrders.size} selected orders? This action cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel className="bg-slate-700 border-slate-600 text-white hover:bg-slate-600">
-              Cancel
-            </AlertDialogCancel>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={handleBulkDelete} className="bg-red-600 hover:bg-red-700">
               Delete Orders
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+    </DashboardLayout>
   )
 }
