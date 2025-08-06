@@ -10,7 +10,15 @@ if (!supabaseUrl || !supabaseAnonKey) {
   throw new Error('Missing Supabase environment variables')
 }
 
-// Server-side Supabase client with cookie support
+// Server-side admin client with service role key
+export const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey, {
+  auth: {
+    autoRefreshToken: false,
+    persistSession: false
+  }
+})
+
+// Server-side client with cookie support for authenticated requests
 export const createServerSupabaseClient = async () => {
   const cookieStore = await cookies()
 
@@ -34,20 +42,33 @@ export const createServerSupabaseClient = async () => {
   })
 }
 
-// Admin client with service role key (server-side only)
-export const supabaseAdmin = supabaseServiceKey 
-  ? createClient(supabaseUrl, supabaseServiceKey, {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false
-      }
-    })
-  : null
-
-// Simple server client without cookies (for API routes)
-export const supabaseServer = createClient(supabaseUrl, supabaseServiceKey || supabaseAnonKey, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession: false
+// Helper function to get authenticated user from server
+export async function getServerUser() {
+  const supabase = await createServerSupabaseClient()
+  const { data: { user }, error } = await supabase.auth.getUser()
+  
+  if (error) {
+    console.error('Error getting user:', error)
+    return null
   }
-})
+  
+  return user
+}
+
+// Helper function to get user profile from server
+export async function getServerUserProfile(userId: string) {
+  const { data, error } = await supabaseAdmin
+    .from('user_profiles')
+    .select('*')
+    .eq('user_id', userId)
+    .single()
+  
+  if (error) {
+    console.error('Error getting user profile:', error)
+    return null
+  }
+  
+  return data
+}
+
+export default supabaseAdmin

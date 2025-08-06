@@ -1,82 +1,196 @@
-import { useState, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { supabase } from '@/lib/supabase'
+import type { UserProfile, Order, Route } from '@/lib/supabase'
 
-export interface ApiResponse<T = any> {
-  data?: T
-  error?: string
-  loading: boolean
+// Custom hook for fetching orders
+export function useOrders(filters?: { status?: string; driver_id?: string; search?: string }) {
+  const [orders, setOrders] = useState<Order[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    async function fetchOrders() {
+      try {
+        setLoading(true)
+        let query = supabase
+          .from('orders')
+          .select(`
+            *,
+            driver:user_profiles!orders_assigned_driver_id_fkey(
+              id,
+              first_name,
+              last_name,
+              email
+            )
+          `)
+          .order('created_at', { ascending: false })
+
+        if (filters?.status) {
+          query = query.eq('status', filters.status)
+        }
+
+        if (filters?.driver_id) {
+          query = query.eq('assigned_driver_id', filters.driver_id)
+        }
+
+        if (filters?.search) {
+          query = query.or(`order_number.ilike.%${filters.search}%,customer_name.ilike.%${filters.search}%`)
+        }
+
+        const { data, error } = await query
+
+        if (error) throw error
+
+        setOrders(data || [])
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to fetch orders')
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchOrders()
+  }, [filters?.status, filters?.driver_id, filters?.search])
+
+  return { orders, loading, error, refetch: () => fetchOrders() }
 }
 
-export function useApi() {
+// Custom hook for fetching drivers
+export function useDrivers(filters?: { availability_status?: string; is_active?: boolean }) {
+  const [drivers, setDrivers] = useState<UserProfile[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    async function fetchDrivers() {
+      try {
+        setLoading(true)
+        let query = supabase
+          .from('user_profiles')
+          .select('*')
+          .eq('role', 'driver')
+          .order('first_name', { ascending: true })
+
+        if (filters?.availability_status) {
+          query = query.eq('availability_status', filters.availability_status)
+        }
+
+        if (filters?.is_active !== undefined) {
+          query = query.eq('is_active', filters.is_active)
+        }
+
+        const { data, error } = await query
+
+        if (error) throw error
+
+        setDrivers(data || [])
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to fetch drivers')
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchDrivers()
+  }, [filters?.availability_status, filters?.is_active])
+
+  return { drivers, loading, error, refetch: () => fetchDrivers() }
+}
+
+// Custom hook for fetching routes
+export function useRoutes(filters?: { status?: string; driver_id?: string }) {
+  const [routes, setRoutes] = useState<Route[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    async function fetchRoutes() {
+      try {
+        setLoading(true)
+        let query = supabase
+          .from('routes')
+          .select(`
+            *,
+            driver:user_profiles!routes_driver_id_fkey(
+              id,
+              first_name,
+              last_name,
+              email
+            ),
+            route_stops(
+              id,
+              order_id,
+              sequence_order,
+              status,
+              orders(
+                id,
+                order_number,
+                customer_name,
+                delivery_address
+              )
+            )
+          `)
+          .order('created_at', { ascending: false })
+
+        if (filters?.status) {
+          query = query.eq('status', filters.status)
+        }
+
+        if (filters?.driver_id) {
+          query = query.eq('driver_id', filters.driver_id)
+        }
+
+        const { data, error } = await query
+
+        if (error) throw error
+
+        setRoutes(data || [])
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to fetch routes')
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchRoutes()
+  }, [filters?.status, filters?.driver_id])
+
+  return { routes, loading, error, refetch: () => fetchRoutes() }
+}
+
+// Custom hook for driver mutations
+export function useDriverMutations() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const request = useCallback(async <T>(
-    operation: () => Promise<{ data: T | null; error: any }>
-  ): Promise<T | null> => {
-    setLoading(true)
-    setError(null)
-
+  const updateDriverStatus = async (driverId: string, status: string) => {
     try {
-      const { data, error: apiError } = await operation()
-      
-      if (apiError) {
-        setError(apiError.message || 'An error occurred')
-        return null
-      }
+      setLoading(true)
+      setError(null)
 
-      return data
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'An unexpected error occurred'
-      setError(errorMessage)
-      return null
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  return { request, loading, error }
-}
-
-export function useDriverMutations() {
-  const { request, loading, error } = useApi()
-
-  const updateDriverStatus = useCallback(async (
-    driverId: string, 
-    status: 'available' | 'busy' | 'offline'
-  ) => {
-    return request(async () => {
-      return await supabase
+      const { error } = await supabase
         .from('user_profiles')
         .update({ availability_status: status })
         .eq('id', driverId)
-        .select()
-        .single()
-    })
-  }, [request])
 
-  const updateDriverLocation = useCallback(async (
-    driverId: string, 
-    location: { latitude: number; longitude: number }
-  ) => {
-    return request(async () => {
-      return await supabase
-        .from('user_profiles')
-        .update({ 
-          current_location: {
-            type: 'Point',
-            coordinates: [location.longitude, location.latitude]
-          }
-        })
-        .eq('id', driverId)
-        .select()
-        .single()
-    })
-  }, [request])
+      if (error) throw error
 
-  const assignOrder = useCallback(async (orderId: string, driverId: string) => {
-    return request(async () => {
-      return await supabase
+      return { success: true }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to update driver status'
+      setError(errorMessage)
+      return { success: false, error: errorMessage }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const assignOrderToDriver = async (orderId: string, driverId: string) => {
+    try {
+      setLoading(true)
+      setError(null)
+
+      const { error } = await supabase
         .from('orders')
         .update({ 
           assigned_driver_id: driverId,
@@ -84,130 +198,106 @@ export function useDriverMutations() {
           assigned_at: new Date().toISOString()
         })
         .eq('id', orderId)
-        .select()
-        .single()
-    })
-  }, [request])
+
+      if (error) throw error
+
+      return { success: true }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to assign order'
+      setError(errorMessage)
+      return { success: false, error: errorMessage }
+    } finally {
+      setLoading(false)
+    }
+  }
 
   return {
     updateDriverStatus,
-    updateDriverLocation,
-    assignOrder,
+    assignOrderToDriver,
     loading,
     error
   }
 }
 
+// Custom hook for route mutations
 export function useRouteMutations() {
-  const { request, loading, error } = useApi()
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
-  const createRoute = useCallback(async (routeData: any) => {
-    return request(async () => {
-      return await supabase
+  const createRoute = async (routeData: Partial<Route>) => {
+    try {
+      setLoading(true)
+      setError(null)
+
+      const { data, error } = await supabase
         .from('routes')
         .insert([routeData])
         .select()
         .single()
-    })
-  }, [request])
 
-  const updateRoute = useCallback(async (routeId: string, updates: any) => {
-    return request(async () => {
-      return await supabase
+      if (error) throw error
+
+      return { success: true, data }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to create route'
+      setError(errorMessage)
+      return { success: false, error: errorMessage }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const updateRoute = async (routeId: string, updates: Partial<Route>) => {
+    try {
+      setLoading(true)
+      setError(null)
+
+      const { data, error } = await supabase
         .from('routes')
         .update(updates)
         .eq('id', routeId)
         .select()
         .single()
-    })
-  }, [request])
 
-  const deleteRoute = useCallback(async (routeId: string) => {
-    return request(async () => {
-      return await supabase
+      if (error) throw error
+
+      return { success: true, data }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to update route'
+      setError(errorMessage)
+      return { success: false, error: errorMessage }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const deleteRoute = async (routeId: string) => {
+    try {
+      setLoading(true)
+      setError(null)
+
+      const { error } = await supabase
         .from('routes')
         .delete()
         .eq('id', routeId)
-    })
-  }, [request])
 
-  const assignDriver = useCallback(async (routeId: string, driverId: string) => {
-    return request(async () => {
-      return await supabase
-        .from('routes')
-        .update({ driver_id: driverId })
-        .eq('id', routeId)
-        .select()
-        .single()
-    })
-  }, [request])
+      if (error) throw error
+
+      return { success: true }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to delete route'
+      setError(errorMessage)
+      return { success: false, error: errorMessage }
+    } finally {
+      setLoading(false)
+    }
+  }
 
   return {
     createRoute,
     updateRoute,
     deleteRoute,
-    assignDriver,
     loading,
     error
   }
 }
-
-export function useOrderMutations() {
-  const { request, loading, error } = useApi()
-
-  const createOrder = useCallback(async (orderData: any) => {
-    return request(async () => {
-      return await supabase
-        .from('orders')
-        .insert([orderData])
-        .select()
-        .single()
-    })
-  }, [request])
-
-  const updateOrder = useCallback(async (orderId: string, updates: any) => {
-    return request(async () => {
-      return await supabase
-        .from('orders')
-        .update(updates)
-        .eq('id', orderId)
-        .select()
-        .single()
-    })
-  }, [request])
-
-  const updateOrderStatus = useCallback(async (
-    orderId: string, 
-    status: string,
-    notes?: string
-  ) => {
-    return request(async () => {
-      const updates: any = { 
-        status,
-        updated_at: new Date().toISOString()
-      }
-      
-      if (notes) {
-        updates.delivery_notes = notes
-      }
-
-      return await supabase
-        .from('orders')
-        .update(updates)
-        .eq('id', orderId)
-        .select()
-        .single()
-    })
-  }, [request])
-
-  return {
-    createOrder,
-    updateOrder,
-    updateOrderStatus,
-    loading,
-    error
-  }
-}
-
-// Default export
-export default useApi

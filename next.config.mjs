@@ -1,10 +1,14 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  serverExternalPackages: ['@supabase/supabase-js'],
   experimental: {
     // Remove the deprecated serverComponentsExternalPackages
+    // Use serverExternalPackages instead
   },
+  serverExternalPackages: [
+    'mapbox-gl'
+  ],
   webpack: (config, { isServer }) => {
+    // Handle mapbox-gl for client-side builds
     if (!isServer) {
       config.resolve.fallback = {
         ...config.resolve.fallback,
@@ -13,17 +17,16 @@ const nextConfig = {
         tls: false,
       }
     }
+
     return config
   },
   images: {
-    domains: ['localhost'],
-    remotePatterns: [
-      {
-        protocol: 'https',
-        hostname: '**',
-      },
-    ],
+    domains: ['placeholder.com'],
     unoptimized: true,
+  },
+  env: {
+    NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN: process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN,
+    GRAPHHOPPER_API_KEY: process.env.GRAPHHOPPER_API_KEY,
   },
   eslint: {
     ignoreDuringBuilds: true,
