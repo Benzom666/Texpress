@@ -11,24 +11,9 @@ import { useAuth } from "@/contexts/auth-context"
 import { supabase, type Order, type OrderUpdate, type UserProfile } from "@/lib/supabase"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import {
-  ArrowLeft,
-  MapPin,
-  User,
-  Package,
-  Clock,
-  CheckCircle,
-  AlertCircle,
-  Truck,
-  Phone,
-  Mail,
-  Calendar,
-  Navigation,
-  FileText,
-  Camera,
-} from "lucide-react"
+import { ArrowLeft, MapPin, User, Package, Clock, CheckCircle, AlertCircle, Truck, Phone, Mail, Calendar, Navigation, FileText, Camera } from 'lucide-react'
 import { StatusChangeFeedback } from "@/components/status-change-feedback"
-import MapboxMap from "@/components/mapbox-map"
+import { MapboxMap } from "@/components/mapbox-map"
 
 // Mock live tracking component - in real app, integrate with Google Maps or similar
 const LiveTrackingMap = ({ order, driver }: { order: Order; driver: UserProfile | null }) => {

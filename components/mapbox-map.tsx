@@ -1,444 +1,384 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
-import { Alert, AlertDescription } from "@/components/ui/alert"
-import { Separator } from "@/components/ui/separator"
-import { MapPin, Clock, Package, Route, RefreshCw, AlertCircle, Zap } from "lucide-react"
+import React, { useEffect, useRef, useState } from 'react'
+import { Card, CardContent } from '@/components/ui/card'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { AlertCircle, MapPin } from 'lucide-react'
+
+// Mock mapbox-gl for environments where it's not available
+let mapboxgl: any = null
+if (typeof window !== 'undefined') {
+  try {
+    mapboxgl = require('mapbox-gl')
+    if (process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN) {
+      mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN
+    }
+  } catch (error) {
+    console.warn('Mapbox GL JS not available:', error)
+  }
+}
 
 interface Order {
   id: string
   order_number: string
   customer_name: string
   delivery_address: string
-  coordinates?: [number, number]
-  priority: "urgent" | "high" | "normal" | "low"
+  priority: string
   status: string
-}
-
-interface OptimizedRoute {
-  id: string
-  name: string
-  orders: Array<{
-    id: string
-    order_number: string
-    customer_name: string
-    delivery_address: string
-    coordinates: [number, number]
-    priority: string
-    estimatedArrival: string
-    distanceFromPrevious: number
-    timeFromPrevious: number
-  }>
-  totalDistance: number
-  totalTime: number
-  estimatedDuration: string
-  waypoints: Array<[number, number]>
+  coordinates?: [number, number]
 }
 
 interface MapboxMapProps {
-  orders: Order[]
-  warehouseLocation: [number, number]
-  warehouseName: string
-  title?: string
+  orders?: Order[]
+  center?: [number, number]
+  zoom?: number
+  style?: string
+  className?: string
   height?: string
-  showRouteOptimization?: boolean
+  title?: string
+  markers?: Array<{
+    id: string
+    coordinates: [number, number]
+    title?: string
+    description?: string
+    color?: string
+  }>
+  routes?: Array<{
+    id: string
+    coordinates: [number, number][]
+    color?: string
+    width?: number
+  }>
+  optimizedRoute?: [number, number][]
+  driverLocation?: [number, number]
   onOrderClick?: (orderId: string) => void
+  onMarkerClick?: (markerId: string) => void
+  onMapLoad?: (map: any) => void
 }
 
-export function MapboxMap({
-  orders,
-  warehouseLocation,
-  warehouseName,
-  title = "Delivery Map",
-  height = "400px",
-  showRouteOptimization = false,
+function MapboxMap({
+  orders = [],
+  center = [-74.006, 40.7128], // Default to NYC
+  zoom = 12,
+  style = 'mapbox://styles/mapbox/streets-v11',
+  className = '',
+  height = '400px',
+  title,
+  markers = [],
+  routes = [],
+  optimizedRoute,
+  driverLocation,
   onOrderClick,
+  onMarkerClick,
+  onMapLoad
 }: MapboxMapProps) {
   const mapContainer = useRef<HTMLDivElement>(null)
   const map = useRef<any>(null)
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [optimizedRoutes, setOptimizedRoutes] = useState<OptimizedRoute[]>([])
-  const [isOptimizing, setIsOptimizing] = useState(false)
-  const [mapboxLoaded, setMapboxLoaded] = useState(false)
+  const markersRef = useRef<{ [key: string]: any }>({})
+  const [mapError, setMapError] = useState<string | null>(null)
+  const [isLoaded, setIsLoaded] = useState(false)
 
-  // Load Mapbox GL JS
   useEffect(() => {
-    const loadMapbox = async () => {
+    if (!mapboxgl) {
+      setMapError('Mapbox GL JS not available')
+      return
+    }
+
+    if (!process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN) {
+      setMapError('Mapbox access token not configured')
+      return
+    }
+
+    if (map.current) return // Initialize map only once
+
+    if (mapContainer.current) {
       try {
-        // Check if Mapbox is already loaded
-        if (typeof window !== "undefined" && (window as any).mapboxgl) {
-          setMapboxLoaded(true)
-          return
-        }
+        map.current = new mapboxgl.Map({
+          container: mapContainer.current,
+          style: style,
+          center: center,
+          zoom: zoom,
+          attributionControl: false
+        })
 
-        // Load Mapbox CSS
-        const cssLink = document.createElement("link")
-        cssLink.href = "https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css"
-        cssLink.rel = "stylesheet"
-        document.head.appendChild(cssLink)
+        map.current.addControl(new mapboxgl.NavigationControl(), 'top-right')
+        map.current.addControl(new mapboxgl.AttributionControl({
+          compact: true
+        }))
 
-        // Load Mapbox JS
-        const script = document.createElement("script")
-        script.src = "https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"
-        script.onload = () => {
-          setMapboxLoaded(true)
-        }
-        script.onerror = () => {
-          setError("Failed to load Mapbox GL JS")
-          setIsLoading(false)
-        }
-        document.head.appendChild(script)
-      } catch (err) {
-        console.error("Error loading Mapbox:", err)
-        setError("Failed to load mapping library")
-        setIsLoading(false)
+        map.current.on('load', () => {
+          setIsLoaded(true)
+          if (onMapLoad && map.current) {
+            onMapLoad(map.current)
+          }
+          addMarkersAndRoutes()
+        })
+
+        map.current.on('error', (e: any) => {
+          console.error('Mapbox error:', e)
+          setMapError('Failed to load map')
+        })
+      } catch (error) {
+        console.error('Error initializing map:', error)
+        setMapError('Failed to initialize map')
       }
     }
 
-    loadMapbox()
-  }, [])
-
-  // Initialize map
-  useEffect(() => {
-    if (!mapboxLoaded || !mapContainer.current || map.current) return
-
-    try {
-      const mapboxgl = (window as any).mapboxgl
-
-      if (!mapboxgl) {
-        setError("Mapbox GL JS not available")
-        setIsLoading(false)
-        return
-      }
-
-      // Check for access token
-      const accessToken = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN
-      if (!accessToken) {
-        console.warn("⚠️ Mapbox access token not found, using fallback map")
-        setError("Map service not configured")
-        setIsLoading(false)
-        return
-      }
-
-      mapboxgl.accessToken = accessToken
-
-      // Initialize map
-      map.current = new mapboxgl.Map({
-        container: mapContainer.current,
-        style: "mapbox://styles/mapbox/streets-v12",
-        center: warehouseLocation,
-        zoom: 11,
-      })
-
-      map.current.on("load", () => {
-        console.log("✅ Map loaded successfully")
-        setIsLoading(false)
-        addMarkersToMap()
-      })
-
-      map.current.on("error", (e: any) => {
-        console.error("❌ Map error:", e)
-        setError("Failed to load map")
-        setIsLoading(false)
-      })
-    } catch (err) {
-      console.error("❌ Error initializing map:", err)
-      setError("Failed to initialize map")
-      setIsLoading(false)
-    }
-
-    // Cleanup
     return () => {
       if (map.current) {
         map.current.remove()
         map.current = null
       }
     }
-  }, [mapboxLoaded, warehouseLocation])
+  }, [center, zoom, style, onMapLoad])
 
-  // Add markers when orders change
+  // Update markers when they change
   useEffect(() => {
-    if (map.current && !isLoading) {
-      addMarkersToMap()
-    }
-  }, [orders, isLoading])
+    if (!map.current || !isLoaded || !mapboxgl) return
 
-  const addMarkersToMap = () => {
-    if (!map.current) return
+    // Clear existing markers
+    Object.values(markersRef.current).forEach((marker: any) => marker.remove())
+    markersRef.current = {}
+
+    // Add new markers
+    markers.forEach(markerData => {
+      try {
+        const el = document.createElement('div')
+        el.className = 'marker'
+        el.style.backgroundColor = markerData.color || '#3b82f6'
+        el.style.width = '20px'
+        el.style.height = '20px'
+        el.style.borderRadius = '50%'
+        el.style.border = '2px solid white'
+        el.style.cursor = 'pointer'
+        el.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3)'
+
+        const marker = new mapboxgl.Marker(el)
+          .setLngLat(markerData.coordinates)
+
+        if (markerData.title || markerData.description) {
+          const popup = new mapboxgl.Popup({ offset: 25 })
+            .setHTML(`
+              <div class="p-2">
+                ${markerData.title ? `<h3 class="font-semibold text-sm">${markerData.title}</h3>` : ''}
+                ${markerData.description ? `<p class="text-xs text-gray-600 mt-1">${markerData.description}</p>` : ''}
+              </div>
+            `)
+          marker.setPopup(popup)
+        }
+
+        if (onMarkerClick) {
+          el.addEventListener('click', () => onMarkerClick(markerData.id))
+        }
+
+        marker.addTo(map.current!)
+        markersRef.current[markerData.id] = marker
+      } catch (error) {
+        console.error('Error adding marker:', error)
+      }
+    })
+  }, [markers, isLoaded, onMarkerClick])
+
+  // Update routes when they change
+  useEffect(() => {
+    if (!map.current || !isLoaded || !mapboxgl) return
+
+    // Remove existing route sources and layers
+    routes.forEach((route, index) => {
+      const sourceId = `route-${index}`
+      const layerId = `route-layer-${index}`
+      
+      if (map.current?.getLayer(layerId)) {
+        map.current.removeLayer(layerId)
+      }
+      if (map.current?.getSource(sourceId)) {
+        map.current.removeSource(sourceId)
+      }
+    })
+
+    // Add new routes
+    routes.forEach((route, index) => {
+      if (map.current && route.coordinates.length > 1) {
+        const sourceId = `route-${index}`
+        const layerId = `route-layer-${index}`
+
+        map.current.addSource(sourceId, {
+          type: 'geojson',
+          data: {
+            type: 'Feature',
+            properties: {},
+            geometry: {
+              type: 'LineString',
+              coordinates: route.coordinates
+            }
+          }
+        })
+
+        map.current.addLayer({
+          id: layerId,
+          type: 'line',
+          source: sourceId,
+          layout: {
+            'line-join': 'round',
+            'line-cap': 'round'
+          },
+          paint: {
+            'line-color': route.color || '#3b82f6',
+            'line-width': route.width || 3
+          }
+        })
+      }
+    })
+  }, [routes, isLoaded])
+
+  const addMarkersAndRoutes = () => {
+    if (!map.current || !mapboxgl) return
 
     try {
-      const mapboxgl = (window as any).mapboxgl
-
-      // Clear existing markers
-      const existingMarkers = document.querySelectorAll(".mapbox-marker")
-      existingMarkers.forEach((marker) => marker.remove())
-
-      // Add warehouse marker
-      const warehouseEl = document.createElement("div")
-      warehouseEl.className = "mapbox-marker warehouse-marker"
-      warehouseEl.innerHTML = `
-        <div style="
-          background: #10b981;
+      // Add driver location marker if provided
+      if (driverLocation) {
+        const driverEl = document.createElement('div')
+        driverEl.className = 'driver-marker'
+        driverEl.style.cssText = `
           width: 30px;
           height: 30px;
-          border-radius: 50%;
+          background: #10b981;
           border: 3px solid white;
+          border-radius: 50%;
+          cursor: pointer;
           display: flex;
           align-items: center;
           justify-content: center;
-          box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-          cursor: pointer;
-        ">
-          <div style="color: white; font-size: 16px;">🏢</div>
-        </div>
-      `
+          font-size: 12px;
+          color: white;
+          font-weight: bold;
+        `
+        driverEl.innerHTML = '🚚'
 
-      new mapboxgl.Marker(warehouseEl)
-        .setLngLat(formatCoordinates(warehouseLocation))
-        .setPopup(
-          new mapboxgl.Popup({ offset: 25 }).setHTML(`
-            <div style="padding: 8px;">
-              <h3 style="margin: 0 0 4px 0; font-weight: bold;">${warehouseName}</h3>
-              <p style="margin: 0; color: #666; font-size: 12px;">Warehouse Location</p>
-            </div>
-          `),
-        )
-        .addTo(map.current)
+        new mapboxgl.Marker(driverEl)
+          .setLngLat([driverLocation[1], driverLocation[0]])
+          .setPopup(new mapboxgl.Popup().setHTML('<div><strong>Driver Location</strong><br/>Current position</div>'))
+          .addTo(map.current)
+      }
 
       // Add order markers
-      const validOrders = orders.filter(
-        (order) =>
-          order.coordinates &&
-          Array.isArray(order.coordinates) &&
-          order.coordinates.length === 2 &&
-          !isNaN(order.coordinates[0]) &&
-          !isNaN(order.coordinates[1]),
-      )
+      orders.forEach((order, index) => {
+        if (!order.coordinates) return
 
-      console.log(`📍 Adding ${validOrders.length} order markers to map`)
-
-      validOrders.forEach((order) => {
-        const coordinates = formatCoordinates(order.coordinates!)
-
+        const el = document.createElement('div')
+        el.className = 'order-marker'
+        
         const priorityColors = {
-          urgent: "#ef4444",
-          high: "#f97316",
-          normal: "#3b82f6",
-          low: "#6b7280",
+          urgent: '#ef4444',
+          high: '#f97316',
+          normal: '#10b981',
+          low: '#6b7280'
         }
-
-        const statusIcons = {
-          pending: "⏳",
-          assigned: "👤",
-          in_transit: "🚚",
-          delivered: "✅",
-          failed: "❌",
-        }
-
-        const el = document.createElement("div")
-        el.className = "mapbox-marker order-marker"
-        el.innerHTML = `
-          <div style="
-            background: ${priorityColors[order.priority] || priorityColors.normal};
-            width: 24px;
-            height: 24px;
-            border-radius: 50%;
-            border: 2px solid white;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-            cursor: pointer;
-            font-size: 12px;
-          ">
-            ${statusIcons[order.status as keyof typeof statusIcons] || "📦"}
-          </div>
+        
+        const color = priorityColors[order.priority as keyof typeof priorityColors] || '#10b981'
+        
+        el.style.cssText = `
+          width: 24px;
+          height: 24px;
+          background: ${color};
+          border: 2px solid white;
+          border-radius: 50%;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 10px;
+          color: white;
+          font-weight: bold;
+          box-shadow: 0 2px 4px rgba(0,0,0,0.3);
         `
+        el.innerHTML = (index + 1).toString()
 
-        el.addEventListener("click", () => {
+        const popup = new mapboxgl.Popup({ offset: 25 }).setHTML(`
+          <div style="padding: 8px;">
+            <strong>${order.customer_name}</strong><br/>
+            <small>${order.order_number}</small><br/>
+            <small>${order.delivery_address}</small><br/>
+            <span style="color: ${color}; font-weight: bold;">${order.priority.toUpperCase()}</span>
+          </div>
+        `)
+
+        const marker = new mapboxgl.Marker(el)
+          .setLngLat([order.coordinates[1], order.coordinates[0]])
+          .setPopup(popup)
+          .addTo(map.current)
+
+        el.addEventListener('click', () => {
           if (onOrderClick) {
             onOrderClick(order.id)
           }
         })
-
-        new mapboxgl.Marker(el)
-          .setLngLat(coordinates)
-          .setPopup(
-            new mapboxgl.Popup({ offset: 25 }).setHTML(`
-              <div style="padding: 8px; min-width: 200px;">
-                <h3 style="margin: 0 0 4px 0; font-weight: bold;">${order.order_number}</h3>
-                <p style="margin: 0 0 4px 0; font-weight: 500;">${order.customer_name}</p>
-                <p style="margin: 0 0 8px 0; color: #666; font-size: 12px;">${order.delivery_address}</p>
-                <div style="display: flex; gap: 4px; flex-wrap: wrap;">
-                  <span style="
-                    background: ${priorityColors[order.priority]};
-                    color: white;
-                    padding: 2px 6px;
-                    border-radius: 12px;
-                    font-size: 10px;
-                    text-transform: uppercase;
-                  ">${order.priority}</span>
-                  <span style="
-                    background: #f3f4f6;
-                    color: #374151;
-                    padding: 2px 6px;
-                    border-radius: 12px;
-                    font-size: 10px;
-                    text-transform: uppercase;
-                  ">${order.status}</span>
-                </div>
-              </div>
-            `),
-          )
-          .addTo(map.current)
       })
 
-      // Fit map to show all markers
-      if (validOrders.length > 0) {
-        const coordinates = [warehouseLocation, ...validOrders.map((order) => order.coordinates!)]
-
-        const bounds = new mapboxgl.LngLatBounds()
-        coordinates.forEach((coord) => {
-          bounds.extend(formatCoordinates(coord))
+      // Add optimized route if provided
+      if (optimizedRoute && optimizedRoute.length > 1) {
+        const routeCoordinates = optimizedRoute.map(coord => [coord[1], coord[0]])
+        
+        map.current.addSource('optimized-route', {
+          type: 'geojson',
+          data: {
+            type: 'Feature',
+            properties: {},
+            geometry: {
+              type: 'LineString',
+              coordinates: routeCoordinates
+            }
+          }
         })
 
-        map.current.fitBounds(bounds, {
-          padding: 50,
-          maxZoom: 15,
-        })
-      }
-    } catch (error) {
-      console.error("❌ Error adding markers:", error)
-      setError("Failed to display order locations")
-    }
-  }
-
-  const formatCoordinates = (coords: [number, number]): [number, number] => {
-    if (!coords || coords.length !== 2) {
-      console.warn("⚠️ Invalid coordinates, using Toronto fallback:", coords)
-      return [-79.3832, 43.6532] // Toronto fallback
-    }
-
-    const [first, second] = coords
-
-    if (isNaN(first) || isNaN(second)) {
-      console.warn("⚠️ NaN coordinates detected, using Toronto fallback:", coords)
-      return [-79.3832, 43.6532]
-    }
-
-    // Ensure longitude, latitude format for Mapbox
-    // If first coordinate is > 90, it's likely longitude
-    if (Math.abs(first) > 90) {
-      return [first, second] // Already lng, lat
-    } else {
-      return [second, first] // Convert lat, lng to lng, lat
-    }
-  }
-
-  const optimizeRoutes = async () => {
-    if (isOptimizing) return
-
-    setIsOptimizing(true)
-    try {
-      console.log("🚚 Starting route optimization...")
-
-      const ordersWithCoordinates = orders.filter(
-        (order) =>
-          order.coordinates &&
-          Array.isArray(order.coordinates) &&
-          order.coordinates.length === 2 &&
-          !isNaN(order.coordinates[0]) &&
-          !isNaN(order.coordinates[1]),
-      )
-
-      if (ordersWithCoordinates.length === 0) {
-        throw new Error("No orders with valid coordinates found")
-      }
-
-      const response = await fetch("/api/optimize-route", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          orders: ordersWithCoordinates,
-          warehouseLocation,
-          settings: {
-            maxOrdersPerRoute: 12,
-            optimizationMethod: "hybrid",
-            considerPriority: true,
-            considerTimeWindows: true,
-            vehicleCapacity: 50,
-            workingHours: {
-              start: "08:00",
-              end: "18:00",
-            },
+        map.current.addLayer({
+          id: 'optimized-route',
+          type: 'line',
+          source: 'optimized-route',
+          layout: {
+            'line-join': 'round',
+            'line-cap': 'round'
           },
-        }),
-      })
-
-      if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.error || "Route optimization failed")
+          paint: {
+            'line-color': '#3b82f6',
+            'line-width': 4,
+            'line-opacity': 0.8
+          }
+        })
       }
-
-      const result = await response.json()
-      setOptimizedRoutes(result.routes || [])
-
-      console.log(`✅ Generated ${result.routes?.length || 0} optimized routes`)
     } catch (error) {
-      console.error("❌ Route optimization error:", error)
-      setError(error instanceof Error ? error.message : "Route optimization failed")
-    } finally {
-      setIsOptimizing(false)
+      console.error('Error adding markers and routes:', error)
     }
   }
 
-  const getPriorityBadge = (priority: string) => {
-    const config = {
-      urgent: { color: "bg-red-100 text-red-800", icon: Zap },
-      high: { color: "bg-orange-100 text-orange-800", icon: AlertCircle },
-      normal: { color: "bg-blue-100 text-blue-800", icon: Package },
-      low: { color: "bg-gray-100 text-gray-800", icon: Clock },
-    }
-
-    const { color, icon: Icon } = config[priority as keyof typeof config] || config.normal
-
+  if (mapError) {
     return (
-      <Badge className={`${color} flex items-center gap-1`}>
-        <Icon className="h-3 w-3" />
-        {priority}
-      </Badge>
-    )
-  }
-
-  if (error) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>{title}</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <Alert variant="destructive">
-            <AlertCircle className="h-4 w-4" />
-            <AlertDescription>{error}</AlertDescription>
+      <Card className={`bg-slate-900 border-slate-800 ${className}`}>
+        <CardContent className="p-6">
+          {title && (
+            <div className="mb-4">
+              <h3 className="text-lg font-semibold text-white">{title}</h3>
+            </div>
+          )}
+          <Alert className="border-red-800 bg-red-900/20">
+            <AlertCircle className="h-4 w-4 text-red-400" />
+            <AlertDescription className="text-red-300">
+              {mapError}
+            </AlertDescription>
           </Alert>
-          <div className="mt-4 p-4 bg-gray-50 rounded-lg">
-            <h4 className="font-medium mb-2">Order Locations</h4>
-            <div className="space-y-2 max-h-40 overflow-y-auto">
-              {orders.slice(0, 5).map((order) => (
-                <div key={order.id} className="flex items-center justify-between text-sm">
-                  <span>{order.order_number}</span>
-                  <span className="text-muted-foreground">{order.customer_name}</span>
+          <div className="mt-4 p-8 bg-slate-800 rounded-lg text-center">
+            <MapPin className="h-12 w-12 text-slate-600 mx-auto mb-4" />
+            <h3 className="text-lg font-medium text-slate-300 mb-2">Map Unavailable</h3>
+            <p className="text-slate-400 text-sm">
+              Showing {orders.length} orders in list format
+            </p>
+            <div className="mt-4 space-y-2 max-h-64 overflow-y-auto">
+              {orders.map((order, index) => (
+                <div key={order.id} className="flex items-center justify-between p-2 bg-slate-700 rounded text-sm">
+                  <span className="text-white">{index + 1}. {order.customer_name}</span>
+                  <span className="text-slate-400">{order.priority}</span>
                 </div>
               ))}
-              {orders.length > 5 && (
-                <p className="text-xs text-muted-foreground">...and {orders.length - 5} more orders</p>
-              )}
             </div>
           </div>
         </CardContent>
@@ -447,117 +387,35 @@ export function MapboxMap({
   }
 
   return (
-    <div className="space-y-4">
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <CardTitle className="flex items-center gap-2">
-              <MapPin className="h-5 w-5" />
-              {title}
-            </CardTitle>
-            {showRouteOptimization && (
-              <Button onClick={optimizeRoutes} disabled={isOptimizing || orders.length === 0} size="sm">
-                <Route className={`h-4 w-4 mr-2 ${isOptimizing ? "animate-spin" : ""}`} />
-                {isOptimizing ? "Optimizing..." : "Optimize Routes"}
-              </Button>
-            )}
+    <Card className={`bg-slate-900 border-slate-800 ${className}`}>
+      <CardContent className="p-0">
+        {title && (
+          <div className="p-4 border-b border-slate-800">
+            <h3 className="text-lg font-semibold text-white">{title}</h3>
           </div>
-        </CardHeader>
-        <CardContent>
+        )}
+        <div className="relative">
           <div
             ref={mapContainer}
             style={{ height }}
-            className="w-full rounded-lg border bg-gray-100 flex items-center justify-center"
-          >
-            {isLoading && (
-              <div className="flex items-center gap-2 text-muted-foreground">
-                <RefreshCw className="h-5 w-5 animate-spin" />
-                Loading map...
-              </div>
-            )}
-          </div>
-
-          {!isLoading && (
-            <div className="mt-4 flex items-center justify-between text-sm text-muted-foreground">
-              <div className="flex items-center gap-4">
-                <span>📍 {orders.length} orders</span>
-                <span>🏢 1 warehouse</span>
-                {orders.filter((o) => o.coordinates).length !== orders.length && (
-                  <span className="text-orange-600">
-                    ⚠️ {orders.length - orders.filter((o) => o.coordinates).length} not geocoded
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="flex items-center gap-1">
-                  <div className="w-3 h-3 bg-red-500 rounded-full"></div>
-                  <span>Urgent</span>
-                </div>
-                <div className="flex items-center gap-1">
-                  <div className="w-3 h-3 bg-orange-500 rounded-full"></div>
-                  <span>High</span>
-                </div>
-                <div className="flex items-center gap-1">
-                  <div className="w-3 h-3 bg-blue-500 rounded-full"></div>
-                  <span>Normal</span>
-                </div>
-                <div className="flex items-center gap-1">
-                  <div className="w-3 h-3 bg-gray-500 rounded-full"></div>
-                  <span>Low</span>
-                </div>
+            className="w-full rounded-b-lg overflow-hidden"
+          />
+          {!isLoaded && (
+            <div className="absolute inset-0 bg-slate-800 flex items-center justify-center">
+              <div className="text-center">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-4"></div>
+                <p className="text-slate-400">Loading map...</p>
               </div>
             </div>
           )}
-        </CardContent>
-      </Card>
-
-      {/* Optimized Routes Display */}
-      {optimizedRoutes.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Route className="h-5 w-5" />
-              Optimized Routes ({optimizedRoutes.length})
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              {optimizedRoutes.map((route, index) => (
-                <div key={route.id} className="border rounded-lg p-4">
-                  <div className="flex items-center justify-between mb-3">
-                    <h4 className="font-medium">{route.name}</h4>
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <span>{route.totalDistance.toFixed(1)} km</span>
-                      <Separator orientation="vertical" className="h-4" />
-                      <span>{route.estimatedDuration}</span>
-                      <Separator orientation="vertical" className="h-4" />
-                      <span>{route.orders.length} stops</span>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    {route.orders.map((order, orderIndex) => (
-                      <div key={order.id} className="flex items-center justify-between py-2 px-3 bg-gray-50 rounded">
-                        <div className="flex items-center gap-3">
-                          <span className="text-xs font-mono bg-white px-2 py-1 rounded">{orderIndex + 1}</span>
-                          <div>
-                            <p className="font-medium text-sm">{order.order_number}</p>
-                            <p className="text-xs text-muted-foreground">{order.customer_name}</p>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          {getPriorityBadge(order.priority)}
-                          <span className="text-xs text-muted-foreground">ETA: {order.estimatedArrival}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-    </div>
+        </div>
+      </CardContent>
+    </Card>
   )
 }
+
+// Named export
+export { MapboxMap }
+
+// Default export
+export default MapboxMap

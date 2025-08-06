@@ -1,59 +1,181 @@
 'use client'
 
-import { useState } from 'react'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { useState, useCallback, useMemo, useRef } from 'react'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { RefreshCw, Download, Upload, MapPin, Search, Package, Truck, CheckCircle, XCircle, Plus, MoreHorizontal } from 'lucide-react'
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
-import { useOrders } from '@/hooks/useApi'
-import Link from 'next/link'
+import { Badge } from '@/components/ui/badge'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { MapboxMap } from '@/components/mapbox-map'
+import { useOrders, useDrivers } from '@/hooks/useApi'
+import { apiClient } from '@/lib/api'
+import { Search, Filter, MapPin, Clock, User, Package, AlertCircle, RefreshCw, Route, CheckSquare, Square } from 'lucide-react'
+
+interface Order {
+  id: string
+  order_number: string
+  customer_name: string
+  delivery_address: string
+  priority: 'urgent' | 'high' | 'normal' | 'low'
+  status: string
+  coordinates?: [number, number]
+  created_at: string
+  phone_number?: string
+  email?: string
+  special_instructions?: string
+}
 
 export default function OrdersPage() {
-  const [searchTerm, setSearchTerm] = useState('')
-  const [statusFilter, setStatusFilter] = useState('all')
-  const [priorityFilter, setPriorityFilter] = useState('all')
-
-  const { data: orders, loading, error, refetch } = useOrders({
-    status: statusFilter,
-    priority: priorityFilter
+  // Stable state management
+  const [filters, setFilters] = useState({
+    page: 1,
+    limit: 50,
+    status: 'all',
+    priority: 'all',
+    search: ''
   })
+  
+  const [selectedOrders, setSelectedOrders] = useState<Set<string>>(new Set())
+  const [optimizing, setOptimizing] = useState(false)
+  const [selectedDriver, setSelectedDriver] = useState<string>('')
 
-  const filteredOrders = orders?.filter(order => {
-    const matchesSearch = order.customer_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         order.order_number.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         order.delivery_address.toLowerCase().includes(searchTerm.toLowerCase())
-    return matchesSearch
-  }) || []
+  // Refs for stable callbacks
+  const searchTimeoutRef = useRef<NodeJS.Timeout>()
+  const filtersRef = useRef(filters)
+  filtersRef.current = filters
 
-  const stats = {
-    all: orders?.length || 0,
-    active: orders?.filter(o => o.status === 'assigned' || o.status === 'in_transit').length || 0,
-    completed: orders?.filter(o => o.status === 'delivered').length || 0,
-    failed: orders?.filter(o => o.status === 'failed').length || 0
-  }
+  // Memoized API parameters to prevent unnecessary re-renders
+  const apiParams = useMemo(() => ({
+    page: filters.page,
+    limit: filters.limit,
+    status: filters.status === 'all' ? undefined : filters.status,
+    priority: filters.priority === 'all' ? undefined : filters.priority,
+    search: filters.search || undefined
+  }), [filters.page, filters.limit, filters.status, filters.priority, filters.search])
 
-  const getStatusColor = (status: string) => {
-    const colors = {
-      pending: 'bg-slate-500/10 text-slate-400 border-slate-500/20',
-      assigned: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
-      in_transit: 'bg-purple-500/10 text-purple-400 border-purple-500/20',
-      delivered: 'bg-green-500/10 text-green-400 border-green-500/20',
-      failed: 'bg-red-500/10 text-red-400 border-red-500/20',
+  // API calls with stable dependencies
+  const { data: ordersData, loading: ordersLoading, error: ordersError, refetch: refetchOrders } = useOrders(apiParams)
+  const { data: driversData, loading: driversLoading } = useDrivers({ available: true })
+
+  // Memoized derived data
+  const orders = useMemo(() => ordersData?.data?.orders || [], [ordersData])
+  const pagination = useMemo(() => ordersData?.data?.pagination, [ordersData])
+  const drivers = useMemo(() => driversData?.data?.drivers || [], [driversData])
+
+  // Stable callback functions using useCallback with proper dependencies
+  const handleSearchChange = useCallback((value: string) => {
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current)
     }
-    return colors[status as keyof typeof colors] || colors.pending
-  }
+    
+    searchTimeoutRef.current = setTimeout(() => {
+      setFilters(prev => ({ ...prev, search: value, page: 1 }))
+    }, 300)
+  }, [])
 
-  const getPriorityColor = (priority: string) => {
-    const colors = {
-      urgent: 'bg-red-500/10 text-red-400 border-red-500/20',
-      high: 'bg-orange-500/10 text-orange-400 border-orange-500/20',
-      normal: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
-      low: 'bg-green-500/10 text-green-400 border-green-500/20',
+  const handleFilterChange = useCallback((key: string, value: string) => {
+    setFilters(prev => ({ ...prev, [key]: value, page: 1 }))
+  }, [])
+
+  const handlePageChange = useCallback((page: number) => {
+    setFilters(prev => ({ ...prev, page }))
+  }, [])
+
+  const handleOrderSelect = useCallback((orderId: string, checked: boolean) => {
+    setSelectedOrders(prev => {
+      const newSet = new Set(prev)
+      if (checked) {
+        newSet.add(orderId)
+      } else {
+        newSet.delete(orderId)
+      }
+      return newSet
+    })
+  }, [])
+
+  const handleSelectAll = useCallback((checked: boolean) => {
+    if (checked) {
+      setSelectedOrders(new Set(orders.map(order => order.id)))
+    } else {
+      setSelectedOrders(new Set())
     }
-    return colors[priority as keyof typeof colors] || colors.normal
+  }, [orders])
+
+  const handleOptimizeRoute = useCallback(async () => {
+    if (selectedOrders.size === 0) {
+      alert('Please select orders to optimize')
+      return
+    }
+
+    if (!selectedDriver) {
+      alert('Please select a driver')
+      return
+    }
+
+    setOptimizing(true)
+    try {
+      const result = await apiClient.optimizeSelectedOrders({
+        orderIds: Array.from(selectedOrders),
+        driverId: selectedDriver,
+        optimizationType: 'distance'
+      })
+
+      if (result.error) {
+        throw new Error(result.error)
+      }
+
+      alert(`Route optimized successfully! Total distance: ${result.data?.totalDistance}km, Total time: ${result.data?.totalTime} minutes`)
+      setSelectedOrders(new Set())
+      refetchOrders()
+    } catch (error) {
+      console.error('Optimization failed:', error)
+      alert('Failed to optimize route. Please try again.')
+    } finally {
+      setOptimizing(false)
+    }
+  }, [selectedOrders, selectedDriver, refetchOrders])
+
+  // Memoized filtered orders for map display
+  const ordersWithCoordinates = useMemo(() => 
+    orders.filter(order => order.coordinates && order.coordinates.length === 2),
+    [orders]
+  )
+
+  const getPriorityColor = useCallback((priority: string) => {
+    switch (priority) {
+      case 'urgent': return 'bg-red-500'
+      case 'high': return 'bg-orange-500'
+      case 'normal': return 'bg-green-500'
+      case 'low': return 'bg-gray-500'
+      default: return 'bg-gray-500'
+    }
+  }, [])
+
+  const getStatusColor = useCallback((status: string) => {
+    switch (status) {
+      case 'pending': return 'bg-yellow-500'
+      case 'assigned': return 'bg-blue-500'
+      case 'in_transit': return 'bg-purple-500'
+      case 'delivered': return 'bg-green-500'
+      case 'failed': return 'bg-red-500'
+      default: return 'bg-gray-500'
+    }
+  }, [])
+
+  if (ordersError) {
+    return (
+      <div className="p-6">
+        <Alert className="border-red-200 bg-red-50">
+          <AlertCircle className="h-4 w-4 text-red-600" />
+          <AlertDescription className="text-red-800">
+            Failed to load orders: {ordersError}
+          </AlertDescription>
+        </Alert>
+      </div>
+    )
   }
 
   return (
@@ -61,100 +183,41 @@ export default function OrdersPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <div className="flex items-center gap-2 mb-2">
-            <div className="w-8 h-8 bg-slate-800 rounded-lg flex items-center justify-center">
-              <span className="text-slate-300 font-bold text-sm">D</span>
-            </div>
-            <span className="text-slate-400 text-sm">DeliveryOS</span>
-          </div>
-          <h1 className="text-2xl font-bold text-white mb-1">Orders Management</h1>
-          <p className="text-slate-400">Manage and track all delivery orders with route optimization</p>
+          <h1 className="text-3xl font-bold">Orders Management</h1>
+          <p className="text-muted-foreground">
+            Manage and optimize delivery orders
+          </p>
         </div>
-        <div className="flex items-center gap-3">
-          <Button variant="outline" className="bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700">
-            <Download className="h-4 w-4 mr-2" />
-            Export
-          </Button>
-          <Button variant="outline" className="bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700">
-            <Upload className="h-4 w-4 mr-2" />
-            Import
-          </Button>
-          <Button variant="outline" className="bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700">
-            <MapPin className="h-4 w-4 mr-2" />
-            Geocode All
-          </Button>
-          <Button
-            onClick={refetch}
-            disabled={loading}
-            className="bg-blue-600 hover:bg-blue-700"
-          >
-            <RefreshCw className={`h-4 w-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
-          </Button>
-        </div>
-      </div>
-
-      {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <Card className="bg-slate-900 border-slate-800">
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium text-slate-300">All</CardTitle>
-            <Package className="h-4 w-4 text-blue-500" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-white">{stats.all}</div>
-          </CardContent>
-        </Card>
-
-        <Card className="bg-slate-900 border-slate-800">
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium text-slate-300">Active</CardTitle>
-            <Truck className="h-4 w-4 text-purple-500" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-white">{stats.active}</div>
-          </CardContent>
-        </Card>
-
-        <Card className="bg-slate-900 border-slate-800">
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium text-slate-300">Completed</CardTitle>
-            <CheckCircle className="h-4 w-4 text-green-500" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-white">{stats.completed}</div>
-          </CardContent>
-        </Card>
-
-        <Card className="bg-slate-900 border-slate-800">
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium text-slate-300">Failed</CardTitle>
-            <XCircle className="h-4 w-4 text-red-500" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-white">{stats.failed}</div>
-          </CardContent>
-        </Card>
+        <Button onClick={refetchOrders} disabled={ordersLoading}>
+          <RefreshCw className={`h-4 w-4 mr-2 ${ordersLoading ? 'animate-spin' : ''}`} />
+          Refresh
+        </Button>
       </div>
 
       {/* Filters */}
-      <Card className="bg-slate-900 border-slate-800">
-        <CardContent className="pt-6">
-          <div className="flex flex-col sm:flex-row gap-4">
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400 h-4 w-4" />
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Filter className="h-5 w-5" />
+            Filters & Search
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="relative">
+              <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
               <Input
-                placeholder="Search orders by number, customer, or address..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="pl-10 bg-slate-800 border-slate-700 text-slate-100 placeholder-slate-400"
+                placeholder="Search orders..."
+                className="pl-10"
+                onChange={(e) => handleSearchChange(e.target.value)}
               />
             </div>
-            <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="w-full sm:w-48 bg-slate-800 border-slate-700 text-slate-100">
-                <SelectValue placeholder="All Statuses" />
+            
+            <Select value={filters.status} onValueChange={(value) => handleFilterChange('status', value)}>
+              <SelectTrigger>
+                <SelectValue placeholder="Filter by status" />
               </SelectTrigger>
-              <SelectContent className="bg-slate-800 border-slate-700">
+              <SelectContent>
                 <SelectItem value="all">All Statuses</SelectItem>
                 <SelectItem value="pending">Pending</SelectItem>
                 <SelectItem value="assigned">Assigned</SelectItem>
@@ -163,11 +226,12 @@ export default function OrdersPage() {
                 <SelectItem value="failed">Failed</SelectItem>
               </SelectContent>
             </Select>
-            <Select value={priorityFilter} onValueChange={setPriorityFilter}>
-              <SelectTrigger className="w-full sm:w-48 bg-slate-800 border-slate-700 text-slate-100">
-                <SelectValue placeholder="All Priorities" />
+
+            <Select value={filters.priority} onValueChange={(value) => handleFilterChange('priority', value)}>
+              <SelectTrigger>
+                <SelectValue placeholder="Filter by priority" />
               </SelectTrigger>
-              <SelectContent className="bg-slate-800 border-slate-700">
+              <SelectContent>
                 <SelectItem value="all">All Priorities</SelectItem>
                 <SelectItem value="urgent">Urgent</SelectItem>
                 <SelectItem value="high">High</SelectItem>
@@ -175,95 +239,188 @@ export default function OrdersPage() {
                 <SelectItem value="low">Low</SelectItem>
               </SelectContent>
             </Select>
+
+            <div className="text-sm text-muted-foreground flex items-center">
+              <Package className="h-4 w-4 mr-1" />
+              {pagination?.total || 0} total orders
+            </div>
           </div>
         </CardContent>
       </Card>
 
-      {/* Orders List */}
-      <Card className="bg-slate-900 border-slate-800">
+      {/* Route Optimization */}
+      {selectedOrders.size > 0 && (
+        <Card className="border-blue-200 bg-blue-50">
+          <CardContent className="pt-6">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-2">
+                  <CheckSquare className="h-5 w-5 text-blue-600" />
+                  <span className="font-medium">
+                    {selectedOrders.size} orders selected
+                  </span>
+                </div>
+                
+                <Select value={selectedDriver} onValueChange={setSelectedDriver}>
+                  <SelectTrigger className="w-48">
+                    <SelectValue placeholder="Select driver" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {drivers.map((driver) => (
+                      <SelectItem key={driver.id} value={driver.id}>
+                        <div className="flex items-center gap-2">
+                          <User className="h-4 w-4" />
+                          {driver.name}
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => setSelectedOrders(new Set())}
+                >
+                  Clear Selection
+                </Button>
+                <Button
+                  onClick={handleOptimizeRoute}
+                  disabled={optimizing || !selectedDriver || driversLoading}
+                >
+                  <Route className={`h-4 w-4 mr-2 ${optimizing ? 'animate-spin' : ''}`} />
+                  {optimizing ? 'Optimizing...' : 'Optimize Route'}
+                </Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Map View */}
+      {ordersWithCoordinates.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <MapPin className="h-5 w-5" />
+              Orders Map View
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <MapboxMap
+              orders={ordersWithCoordinates}
+              center={[-79.3832, 43.6532]}
+              zoom={10}
+              className="h-96"
+            />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Orders Table */}
+      <Card>
         <CardHeader>
-          <CardTitle className="text-white">Orders ({filteredOrders.length})</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Package className="h-5 w-5" />
+            Orders List
+          </CardTitle>
         </CardHeader>
         <CardContent>
-          {loading ? (
-            <div className="space-y-4">
-              {[1, 2, 3, 4, 5].map((i) => (
-                <div key={i} className="animate-pulse">
-                  <div className="h-16 bg-slate-800 rounded-lg"></div>
-                </div>
-              ))}
+          {ordersLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <RefreshCw className="h-6 w-6 animate-spin mr-2" />
+              Loading orders...
             </div>
-          ) : error ? (
-            <div className="text-center py-8">
-              <XCircle className="h-12 w-12 text-red-400 mx-auto mb-4" />
-              <h3 className="text-lg font-medium text-white mb-2">Error Loading Orders</h3>
-              <p className="text-slate-400 mb-4">{error}</p>
-              <Button onClick={refetch} className="bg-blue-600 hover:bg-blue-700">
-                <RefreshCw className="h-4 w-4 mr-2" />
-                Try Again
-              </Button>
-            </div>
-          ) : filteredOrders.length > 0 ? (
-            <div className="space-y-4">
-              {filteredOrders.map((order) => (
-                <div key={order.id} className="flex items-center justify-between p-4 bg-slate-800 rounded-lg hover:bg-slate-700 transition-colors">
-                  <div className="flex items-center space-x-4">
-                    <div>
-                      <p className="text-sm font-medium text-white">#{order.order_number}</p>
-                      <p className="text-xs text-slate-400">{order.customer_name}</p>
-                      <p className="text-xs text-slate-500 truncate max-w-xs">{order.delivery_address}</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <div className="flex flex-col space-y-1">
-                      <Badge className={`text-xs ${getPriorityColor(order.priority)}`}>
-                        {order.priority}
-                      </Badge>
-                      <Badge className={`text-xs ${getStatusColor(order.status)}`}>
-                        {order.status.replace('_', ' ')}
-                      </Badge>
-                    </div>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white">
-                          <MoreHorizontal className="h-4 w-4" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent className="bg-slate-800 border-slate-700">
-                        <DropdownMenuItem className="text-slate-300 hover:bg-slate-700">
-                          View Details
-                        </DropdownMenuItem>
-                        <DropdownMenuItem className="text-slate-300 hover:bg-slate-700">
-                          Edit Order
-                        </DropdownMenuItem>
-                        <DropdownMenuItem className="text-slate-300 hover:bg-slate-700">
-                          Assign Driver
-                        </DropdownMenuItem>
-                        <DropdownMenuItem className="text-red-400 hover:bg-slate-700">
-                          Cancel Order
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </div>
-                </div>
-              ))}
+          ) : orders.length === 0 ? (
+            <div className="text-center py-8 text-muted-foreground">
+              No orders found matching your criteria
             </div>
           ) : (
-            <div className="text-center py-8">
-              <Package className="h-12 w-12 text-slate-600 mx-auto mb-4" />
-              <h3 className="text-lg font-medium text-slate-300 mb-2">No orders found</h3>
-              <p className="text-slate-400 mb-4">
-                {searchTerm || statusFilter !== 'all' || priorityFilter !== 'all'
-                  ? 'Try adjusting your search or filters'
-                  : 'Create your first order to get started'}
-              </p>
-              <Button asChild className="bg-blue-600 hover:bg-blue-700">
-                <Link href="/admin/orders/create">
-                  <Plus className="h-4 w-4 mr-2" />
-                  Create Order
-                </Link>
-              </Button>
-            </div>
+            <>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-12">
+                      <Checkbox
+                        checked={selectedOrders.size === orders.length && orders.length > 0}
+                        onCheckedChange={handleSelectAll}
+                      />
+                    </TableHead>
+                    <TableHead>Order #</TableHead>
+                    <TableHead>Customer</TableHead>
+                    <TableHead>Address</TableHead>
+                    <TableHead>Priority</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Created</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {orders.map((order) => (
+                    <TableRow key={order.id}>
+                      <TableCell>
+                        <Checkbox
+                          checked={selectedOrders.has(order.id)}
+                          onCheckedChange={(checked) => handleOrderSelect(order.id, checked as boolean)}
+                        />
+                      </TableCell>
+                      <TableCell className="font-medium">
+                        {order.order_number}
+                      </TableCell>
+                      <TableCell>{order.customer_name}</TableCell>
+                      <TableCell className="max-w-xs truncate">
+                        {order.delivery_address}
+                      </TableCell>
+                      <TableCell>
+                        <Badge className={`${getPriorityColor(order.priority)} text-white`}>
+                          {order.priority}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        <Badge className={`${getStatusColor(order.status)} text-white`}>
+                          {order.status}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1 text-sm text-muted-foreground">
+                          <Clock className="h-3 w-3" />
+                          {new Date(order.created_at).toLocaleDateString()}
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+
+              {/* Pagination */}
+              {pagination && pagination.totalPages > 1 && (
+                <div className="flex items-center justify-between mt-4">
+                  <div className="text-sm text-muted-foreground">
+                    Showing {((pagination.page - 1) * pagination.limit) + 1} to{' '}
+                    {Math.min(pagination.page * pagination.limit, pagination.total)} of{' '}
+                    {pagination.total} orders
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handlePageChange(pagination.page - 1)}
+                      disabled={pagination.page <= 1}
+                    >
+                      Previous
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handlePageChange(pagination.page + 1)}
+                      disabled={pagination.page >= pagination.totalPages}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </CardContent>
       </Card>

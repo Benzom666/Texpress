@@ -2,7 +2,7 @@
 
 import type React from "react"
 import { createContext, useContext, useEffect, useState } from "react"
-import { createClient } from "@supabase/supabase-js"
+import { supabaseClient } from "@/lib/supabase-client"
 import type { User } from "@supabase/supabase-js"
 
 interface UserProfile {
@@ -32,15 +32,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [loading, setLoading] = useState(true)
   const [initialized, setInitialized] = useState(false)
-
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-
-  if (!supabaseUrl || !supabaseAnonKey) {
-    console.error("Missing Supabase environment variables")
-  }
-
-  const supabase = createClient(supabaseUrl!, supabaseAnonKey!)
 
   const fetchUserProfile = async (userId: string) => {
     try {
@@ -80,12 +71,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signIn = async (email: string, password: string) => {
     try {
-      if (!supabaseUrl || !supabaseAnonKey) {
-        const error = new Error("Supabase configuration is missing. Please check environment variables.")
+      if (!supabaseClient) {
+        const error = new Error("Supabase client is not available. Please check environment variables.")
         return { error }
       }
 
-      const { data, error } = await supabase.auth.signInWithPassword({
+      const { data, error } = await supabaseClient.auth.signInWithPassword({
         email,
         password,
       })
@@ -120,7 +111,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const initializeAuth = async () => {
       try {
-        if (!supabaseUrl || !supabaseAnonKey) {
+        if (!supabaseClient) {
           if (mounted) {
             setLoading(false)
             setInitialized(true)
@@ -131,9 +122,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const {
           data: { session },
           error,
-        } = await supabase.auth.getSession()
+        } = await supabaseClient.auth.getSession()
 
         if (error) {
+          console.error("Auth session error:", error)
           if (mounted) {
             setLoading(false)
             setInitialized(true)
@@ -154,6 +146,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setInitialized(true)
         }
       } catch (error) {
+        console.error("Auth initialization error:", error)
         if (mounted) {
           setLoading(false)
           setInitialized(true)
@@ -163,9 +156,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     initializeAuth()
 
+    if (!supabaseClient) {
+      return () => {
+        mounted = false
+      }
+    }
+
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (event, session) => {
+    } = supabaseClient.auth.onAuthStateChange(async (event, session) => {
       if (!mounted || !initialized) return
 
       if (event === "SIGNED_IN" && session?.user) {
@@ -186,17 +185,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       mounted = false
       subscription.unsubscribe()
     }
-  }, [supabaseUrl, supabaseAnonKey])
+  }, [])
 
   const signOut = async () => {
     try {
-      const { error } = await supabase.auth.signOut()
+      if (!supabaseClient) {
+        throw new Error("Supabase client is not available")
+      }
+      
+      const { error } = await supabaseClient.auth.signOut()
       if (error) {
         throw error
       }
       setUser(null)
       setProfile(null)
     } catch (error) {
+      console.error("Sign out error:", error)
       throw error
     }
   }

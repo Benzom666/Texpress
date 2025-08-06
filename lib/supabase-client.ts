@@ -1,54 +1,45 @@
-import { createClient } from "@supabase/supabase-js"
+import { createClient as createSupabaseClient } from '@supabase/supabase-js'
+import { createServerClient } from '@supabase/ssr'
+import { cookies } from 'next/headers'
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 
 if (!supabaseUrl || !supabaseAnonKey) {
-  console.error("Missing Supabase environment variables:", {
-    url: !!supabaseUrl,
-    key: !!supabaseAnonKey,
+  throw new Error('Missing Supabase environment variables')
+}
+
+// Client-side Supabase client
+export const supabaseClient = createSupabaseClient(supabaseUrl, supabaseAnonKey)
+
+// Named export for createClient function
+export const createClient = () => {
+  return createSupabaseClient(supabaseUrl, supabaseAnonKey)
+}
+
+// Server-side Supabase client with cookie support
+export const createServerSupabaseClient = async () => {
+  const cookieStore = await cookies()
+
+  return createServerClient(supabaseUrl, supabaseAnonKey, {
+    cookies: {
+      getAll() {
+        return cookieStore.getAll()
+      },
+      setAll(cookiesToSet) {
+        try {
+          cookiesToSet.forEach(({ name, value, options }) =>
+            cookieStore.set(name, value, options)
+          )
+        } catch {
+          // The `setAll` method was called from a Server Component.
+          // This can be ignored if you have middleware refreshing
+          // user sessions.
+        }
+      },
+    },
   })
 }
 
-export const createSupabaseClient = () => {
-  return createClient(supabaseUrl, supabaseAnonKey, {
-    auth: {
-      persistSession: true,
-      autoRefreshToken: true,
-      detectSessionInUrl: true,
-      flowType: "pkce",
-    },
-    global: {
-      headers: {
-        "Content-Type": "application/json",
-      },
-    },
-    db: {
-      schema: "public",
-    },
-    realtime: {
-      params: {
-        eventsPerSecond: 10,
-      },
-    },
-  })
-}
-
-// Export a default client instance
-export const supabaseClient = createSupabaseClient()
-
-// Test connection function
-export const testSupabaseConnection = async () => {
-  try {
-    const { data, error } = await supabaseClient.from("user_profiles").select("count").limit(1)
-    if (error) {
-      console.error("Supabase connection test failed:", error)
-      return false
-    }
-    console.log("Supabase connection successful")
-    return true
-  } catch (err) {
-    console.error("Supabase connection error:", err)
-    return false
-  }
-}
+// Default export
+export default supabaseClient

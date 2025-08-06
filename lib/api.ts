@@ -1,492 +1,180 @@
-import { supabase } from './supabase'
-
-// Types
-export interface Order {
-  id: string
-  order_number: string
-  customer_name: string
-  customer_email?: string
-  customer_phone?: string
-  delivery_address: string
-  status: 'pending' | 'assigned' | 'in_transit' | 'delivered' | 'failed' | 'cancelled'
-  priority: 'low' | 'normal' | 'high' | 'urgent'
-  created_at: string
-  updated_at: string
-  assigned_driver_id?: string
-  route_id?: string
-  coordinates?: [number, number]
-  assigned_driver?: Driver
+interface ApiResponse<T> {
+  data?: T
+  error?: string
+  pagination?: {
+    page: number
+    limit: number
+    total: number
+    totalPages: number
+  }
 }
 
-export interface Driver {
-  id: string
-  user_id?: string
-  first_name: string
-  last_name: string
-  email: string
-  phone?: string
-  role: string
-  status?: 'active' | 'inactive' | 'suspended'
-  availability_status?: 'available' | 'assigned' | 'offline' | 'busy'
-  created_at: string
-  updated_at: string
-}
+class ApiClient {
+  private baseUrl: string
 
-export interface Route {
-  id: string
-  route_number: string
-  route_name: string
-  status: 'planned' | 'in_progress' | 'completed' | 'cancelled'
-  total_stops: number
-  total_distance: number
-  estimated_duration: number
-  driver_id?: string
-  created_by: string
-  created_at: string
-  updated_at: string
-  driver?: Driver
-  route_stops?: RouteStop[]
-}
-
-export interface RouteStop {
-  id: string
-  route_id: string
-  order_id: string
-  stop_number: number
-  sequence_order: number
-  address: string
-  latitude?: number
-  longitude?: number
-  status: 'pending' | 'completed' | 'failed'
-  estimated_time: number
-  distance_from_previous: number
-}
-
-// API Functions
-export class API {
-  // Orders
-  static async getOrders(filters?: {
-    status?: string
-    priority?: string
-    driver_id?: string
-    route_id?: string
-    limit?: number
-    offset?: number
-  }): Promise<{ data: Order[]; error: string | null }> {
-    try {
-      // First try to get orders with driver information
-      let query = supabase
-        .from('orders')
-        .select(`
-          *,
-          assigned_driver:user_profiles(
-            id,
-            first_name,
-            last_name,
-            email,
-            role
-          )
-        `)
-        .order('created_at', { ascending: false })
-
-      if (filters?.status && filters.status !== 'all') {
-        query = query.eq('status', filters.status)
-      }
-      if (filters?.priority && filters.priority !== 'all') {
-        query = query.eq('priority', filters.priority)
-      }
-      if (filters?.driver_id) {
-        query = query.eq('assigned_driver_id', filters.driver_id)
-      }
-      if (filters?.route_id) {
-        query = query.eq('route_id', filters.route_id)
-      }
-      if (filters?.limit) {
-        const offset = filters.offset || 0
-        query = query.range(offset, offset + filters.limit - 1)
-      }
-
-      const { data, error } = await query
-
-      if (error) {
-        console.error('Error fetching orders with joins:', error)
-        // Fallback to simple query without joins
-        return this.getOrdersSimple(filters)
-      }
-
-      return { data: data || [], error: null }
-    } catch (error) {
-      console.error('API Error - getOrders:', error)
-      // Fallback to simple query
-      return this.getOrdersSimple(filters)
-    }
+  constructor() {
+    this.baseUrl = process.env.NEXT_PUBLIC_API_URL || ''
   }
 
-  // Simple fallback method for orders without joins
-  static async getOrdersSimple(filters?: {
-    status?: string
-    priority?: string
-    driver_id?: string
-    route_id?: string
-    limit?: number
-    offset?: number
-  }): Promise<{ data: Order[]; error: string | null }> {
+  private async request<T>(
+    endpoint: string,
+    options: RequestInit = {}
+  ): Promise<ApiResponse<T>> {
     try {
-      let query = supabase
-        .from('orders')
-        .select('*')
-        .order('created_at', { ascending: false })
-
-      if (filters?.status && filters.status !== 'all') {
-        query = query.eq('status', filters.status)
-      }
-      if (filters?.priority && filters.priority !== 'all') {
-        query = query.eq('priority', filters.priority)
-      }
-      if (filters?.driver_id) {
-        query = query.eq('assigned_driver_id', filters.driver_id)
-      }
-      if (filters?.route_id) {
-        query = query.eq('route_id', filters.route_id)
-      }
-      if (filters?.limit) {
-        const offset = filters.offset || 0
-        query = query.range(offset, offset + filters.limit - 1)
-      }
-
-      const { data, error } = await query
-
-      if (error) {
-        console.error('Error fetching orders (simple):', error)
-        return { data: [], error: error.message }
-      }
-
-      // If we have orders with assigned drivers, fetch driver info separately
-      const ordersWithDrivers = await this.enrichOrdersWithDriverInfo(data || [])
-
-      return { data: ordersWithDrivers, error: null }
-    } catch (error) {
-      console.error('API Error - getOrdersSimple:', error)
-      return { data: [], error: 'Failed to fetch orders' }
-    }
-  }
-
-  // Helper method to enrich orders with driver information
-  static async enrichOrdersWithDriverInfo(orders: Order[]): Promise<Order[]> {
-    if (!orders.length) return orders
-
-    const driverIds = orders
-      .map(order => order.assigned_driver_id)
-      .filter(Boolean) as string[]
-
-    if (!driverIds.length) return orders
-
-    try {
-      const { data: drivers } = await supabase
-        .from('user_profiles')
-        .select('id, first_name, last_name, email, role')
-        .in('id', driverIds)
-
-      const driverMap = new Map(drivers?.map(driver => [driver.id, driver]) || [])
-
-      return orders.map(order => ({
-        ...order,
-        assigned_driver: order.assigned_driver_id ? driverMap.get(order.assigned_driver_id) : undefined
-      }))
-    } catch (error) {
-      console.error('Error enriching orders with driver info:', error)
-      return orders
-    }
-  }
-
-  static async createOrder(orderData: Partial<Order>): Promise<{ data: Order | null; error: string | null }> {
-    try {
-      const { data, error } = await supabase
-        .from('orders')
-        .insert([{
-          ...orderData,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
-        }])
-        .select()
-        .single()
-
-      if (error) {
-        console.error('Error creating order:', error)
-        return { data: null, error: error.message }
-      }
-
-      return { data, error: null }
-    } catch (error) {
-      console.error('API Error - createOrder:', error)
-      return { data: null, error: 'Failed to create order' }
-    }
-  }
-
-  static async updateOrder(id: string, updates: Partial<Order>): Promise<{ data: Order | null; error: string | null }> {
-    try {
-      const { data, error } = await supabase
-        .from('orders')
-        .update({
-          ...updates,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', id)
-        .select()
-        .single()
-
-      if (error) {
-        console.error('Error updating order:', error)
-        return { data: null, error: error.message }
-      }
-
-      return { data, error: null }
-    } catch (error) {
-      console.error('API Error - updateOrder:', error)
-      return { data: null, error: 'Failed to update order' }
-    }
-  }
-
-  // Drivers
-  static async getDrivers(filters?: {
-    status?: string
-    availability_status?: string
-  }): Promise<{ data: Driver[]; error: string | null }> {
-    try {
-      let query = supabase
-        .from('user_profiles')
-        .select('*')
-        .eq('role', 'driver')
-        .order('first_name')
-
-      if (filters?.status && filters.status !== 'all') {
-        query = query.eq('status', filters.status)
-      }
-      if (filters?.availability_status && filters.availability_status !== 'all') {
-        query = query.eq('availability_status', filters.availability_status)
-      }
-
-      const { data, error } = await query
-
-      if (error) {
-        console.error('Error fetching drivers:', error)
-        return { data: [], error: error.message }
-      }
-
-      return { data: data || [], error: null }
-    } catch (error) {
-      console.error('API Error - getDrivers:', error)
-      return { data: [], error: 'Failed to fetch drivers' }
-    }
-  }
-
-  static async updateDriverStatus(id: string, status: string): Promise<{ error: string | null }> {
-    try {
-      const { error } = await supabase
-        .from('user_profiles')
-        .update({
-          availability_status: status,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', id)
-
-      if (error) {
-        console.error('Error updating driver status:', error)
-        return { error: error.message }
-      }
-
-      return { error: null }
-    } catch (error) {
-      console.error('API Error - updateDriverStatus:', error)
-      return { error: 'Failed to update driver status' }
-    }
-  }
-
-  // Routes
-  static async getRoutes(filters?: {
-    status?: string
-    driver_id?: string
-  }): Promise<{ data: Route[]; error: string | null }> {
-    try {
-      let query = supabase
-        .from('routes')
-        .select(`
-          *,
-          driver:user_profiles(
-            id,
-            first_name,
-            last_name,
-            email,
-            role
-          ),
-          route_stops(
-            id,
-            stop_number,
-            sequence_order,
-            address,
-            status,
-            orders(
-              id,
-              order_number,
-              customer_name,
-              delivery_address
-            )
-          )
-        `)
-        .order('created_at', { ascending: false })
-
-      if (filters?.status && filters.status !== 'all') {
-        query = query.eq('status', filters.status)
-      }
-      if (filters?.driver_id) {
-        query = query.eq('driver_id', filters.driver_id)
-      }
-
-      const { data, error } = await query
-
-      if (error) {
-        console.error('Error fetching routes:', error)
-        // Fallback to simple routes query
-        return this.getRoutesSimple(filters)
-      }
-
-      return { data: data || [], error: null }
-    } catch (error) {
-      console.error('API Error - getRoutes:', error)
-      return this.getRoutesSimple(filters)
-    }
-  }
-
-  static async getRoutesSimple(filters?: {
-    status?: string
-    driver_id?: string
-  }): Promise<{ data: Route[]; error: string | null }> {
-    try {
-      let query = supabase
-        .from('routes')
-        .select('*')
-        .order('created_at', { ascending: false })
-
-      if (filters?.status && filters.status !== 'all') {
-        query = query.eq('status', filters.status)
-      }
-      if (filters?.driver_id) {
-        query = query.eq('driver_id', filters.driver_id)
-      }
-
-      const { data, error } = await query
-
-      if (error) {
-        console.error('Error fetching routes (simple):', error)
-        return { data: [], error: error.message }
-      }
-
-      return { data: data || [], error: null }
-    } catch (error) {
-      console.error('API Error - getRoutesSimple:', error)
-      return { data: [], error: 'Failed to fetch routes' }
-    }
-  }
-
-  static async assignDriverToRoute(routeId: string, driverId: string): Promise<{ error: string | null }> {
-    try {
-      const { error } = await supabase
-        .from('routes')
-        .update({
-          driver_id: driverId,
-          status: 'assigned',
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', routeId)
-
-      if (error) {
-        console.error('Error assigning driver to route:', error)
-        return { error: error.message }
-      }
-
-      // Update orders in the route
-      await supabase
-        .from('orders')
-        .update({
-          assigned_driver_id: driverId,
-          status: 'assigned',
-          updated_at: new Date().toISOString()
-        })
-        .eq('route_id', routeId)
-
-      return { error: null }
-    } catch (error) {
-      console.error('API Error - assignDriverToRoute:', error)
-      return { error: 'Failed to assign driver to route' }
-    }
-  }
-
-  // Dashboard Stats
-  static async getDashboardStats(): Promise<{
-    data: {
-      totalOrders: number
-      pendingOrders: number
-      inTransitOrders: number
-      completedOrders: number
-      activeDrivers: number
-      totalDrivers: number
-      successRate: number
-      deliveredToday: number
-    } | null
-    error: string | null
-  }> {
-    try {
-      // Get orders stats
-      const { data: orders, error: ordersError } = await supabase
-        .from('orders')
-        .select('id, status, created_at')
-
-      if (ordersError) {
-        return { data: null, error: ordersError.message }
-      }
-
-      // Get drivers stats
-      const { data: drivers, error: driversError } = await supabase
-        .from('user_profiles')
-        .select('id, availability_status')
-        .eq('role', 'driver')
-
-      if (driversError) {
-        return { data: null, error: driversError.message }
-      }
-
-      const totalOrders = orders?.length || 0
-      const pendingOrders = orders?.filter(o => o.status === 'pending').length || 0
-      const inTransitOrders = orders?.filter(o => o.status === 'in_transit').length || 0
-      const completedOrders = orders?.filter(o => o.status === 'delivered').length || 0
-      
-      const totalDrivers = drivers?.length || 0
-      const activeDrivers = drivers?.filter(d => d.availability_status === 'available').length || 0
-      
-      const today = new Date().toISOString().split('T')[0]
-      const deliveredToday = orders?.filter(o => 
-        o.status === 'delivered' && 
-        o.created_at.startsWith(today)
-      ).length || 0
-      
-      const successRate = totalOrders > 0 ? Math.round((completedOrders / totalOrders) * 100) : 0
-
-      return {
-        data: {
-          totalOrders,
-          pendingOrders,
-          inTransitOrders,
-          completedOrders,
-          activeDrivers,
-          totalDrivers,
-          successRate,
-          deliveredToday
+      const url = `${this.baseUrl}/api${endpoint}`
+      const response = await fetch(url, {
+        headers: {
+          'Content-Type': 'application/json',
+          ...options.headers,
         },
-        error: null
+        ...options,
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.error || `HTTP error! status: ${response.status}`)
       }
+
+      const data = await response.json()
+      return { data }
     } catch (error) {
-      console.error('API Error - getDashboardStats:', error)
-      return { data: null, error: 'Failed to fetch dashboard stats' }
+      console.error(`API request failed for ${endpoint}:`, error)
+      return { error: error instanceof Error ? error.message : 'Unknown error' }
     }
   }
+
+  // Orders API
+  async getOrders(params: {
+    page?: number
+    limit?: number
+    status?: string
+    priority?: string
+    search?: string
+  } = {}) {
+    const searchParams = new URLSearchParams()
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) {
+        searchParams.append(key, value.toString())
+      }
+    })
+
+    const queryString = searchParams.toString()
+    const endpoint = `/orders${queryString ? `?${queryString}` : ''}`
+    
+    return this.request<{
+      orders: any[]
+      pagination: {
+        page: number
+        limit: number
+        total: number
+        totalPages: number
+      }
+    }>(endpoint)
+  }
+
+  async createOrder(orderData: any) {
+    return this.request<{ order: any }>('/orders', {
+      method: 'POST',
+      body: JSON.stringify(orderData),
+    })
+  }
+
+  async getOrder(id: string) {
+    return this.request<{ order: any }>(`/orders/${id}`)
+  }
+
+  async updateOrder(id: string, updates: any) {
+    return this.request<{ order: any }>(`/orders/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    })
+  }
+
+  async deleteOrder(id: string) {
+    return this.request<{ success: boolean }>(`/orders/${id}`, {
+      method: 'DELETE',
+    })
+  }
+
+  // Drivers API
+  async getDrivers(params: { available?: boolean } = {}) {
+    const searchParams = new URLSearchParams()
+    if (params.available !== undefined) {
+      searchParams.append('available', params.available.toString())
+    }
+
+    const queryString = searchParams.toString()
+    const endpoint = `/drivers${queryString ? `?${queryString}` : ''}`
+    
+    return this.request<{ drivers: any[] }>(endpoint)
+  }
+
+  async createDriver(driverData: any) {
+    return this.request<{ driver: any }>('/drivers', {
+      method: 'POST',
+      body: JSON.stringify(driverData),
+    })
+  }
+
+  async getDriver(id: string) {
+    return this.request<{ driver: any }>(`/drivers/${id}`)
+  }
+
+  async updateDriver(id: string, updates: any) {
+    return this.request<{ driver: any }>(`/drivers/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    })
+  }
+
+  // Route Optimization API
+  async optimizeSelectedOrders(params: {
+    orderIds: string[]
+    driverId?: string
+    optimizationType?: 'distance' | 'time' | 'priority'
+  }) {
+    return this.request<{
+      success: boolean
+      routeId?: string
+      stops: any[]
+      totalDistance: number
+      totalTime: number
+      optimizationType: string
+    }>('/optimize-selected-orders', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    })
+  }
+
+  // Routes API
+  async getRoutes() {
+    return this.request<{ routes: any[] }>('/routes')
+  }
+
+  async createRoute(routeData: any) {
+    return this.request<{ route: any }>('/routes', {
+      method: 'POST',
+      body: JSON.stringify(routeData),
+    })
+  }
+
+  async getRoute(id: string) {
+    return this.request<{ route: any }>(`/routes/${id}`)
+  }
+
+  async updateRoute(id: string, updates: any) {
+    return this.request<{ route: any }>(`/routes/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    })
+  }
+
+  async deleteRoute(id: string) {
+    return this.request<{ success: boolean }>(`/routes/${id}`, {
+      method: 'DELETE',
+    })
+  }
 }
+
+export const apiClient = new ApiClient()
+export default apiClient

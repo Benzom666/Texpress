@@ -4,10 +4,10 @@ import { useEffect, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { DashboardLayout } from "@/components/dashboard-layout"
 import { supabase } from "@/lib/supabase"
-import { Users, Truck, Package, TrendingUp, RefreshCw, MapPinIcon } from "lucide-react"
+import { Users, Truck, Package, TrendingUp, RefreshCw, MapPinIcon } from 'lucide-react'
 import { Button } from "@/components/ui/button"
 import { useToast } from "@/components/ui/use-toast"
-import MapboxMap from "@/components/mapbox-map"
+import { MapboxMap } from "@/components/mapbox-map"
 
 interface DashboardStats {
   totalAdmins: number
