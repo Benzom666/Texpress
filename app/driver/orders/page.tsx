@@ -15,6 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import MobileMapWidget from "@/components/mobile-map-widget"
 import { routeManager } from "@/lib/route-manager"
 import { routePersistenceService } from "@/lib/route-persistence"
+import { analytics } from "@/lib/analytics"
 import {
   Package,
   Clock,
@@ -42,6 +43,8 @@ interface OrderWithActions extends Order {
   canDeliver?: boolean
   canComplete?: boolean
   stop_number?: number
+  route_number?: string
+  stop_label?: string
 }
 
 interface RouteState {
@@ -65,7 +68,6 @@ export default function DriverOrdersPage() {
   const [driverLocation, setDriverLocation] = useState<[number, number] | null>(null)
   const [showFilters, setShowFilters] = useState(false)
 
-  // Enhanced route state management with persistence
   const [routeState, setRouteState] = useState<RouteState>({
     isOptimized: false,
     persistentRoute: null,
@@ -73,16 +75,13 @@ export default function DriverOrdersPage() {
     lastOptimizedAt: null,
   })
 
-  // Ref to prevent multiple simultaneous fetches
   const fetchingRef = useRef(false)
   const routeStateRef = useRef(routeState)
 
-  // Update ref when state changes
   useEffect(() => {
     routeStateRef.current = routeState
   }, [routeState])
 
-  // Cleanup old route states on mount
   useEffect(() => {
     routePersistenceService.cleanupOldStates()
   }, [])
@@ -90,10 +89,10 @@ export default function DriverOrdersPage() {
   useEffect(() => {
     if (profile) {
       initializeDriverData()
+      analytics.trackUserAction("view_driver_orders_page", { driverId: profile.user_id })
     }
   }, [profile])
 
-  // Save route state whenever it changes
   useEffect(() => {
     if (profile && routeState.isOptimized) {
       routePersistenceService.saveRouteState(profile.user_id, {
@@ -115,21 +114,15 @@ export default function DriverOrdersPage() {
         (position) => {
           const coords: [number, number] = [position.coords.latitude, position.coords.longitude]
           setDriverLocation(coords)
-          console.log(`Driver location detected: [${coords[0]}, ${coords[1]}]`)
         },
         (error) => {
-          console.log("Geolocation error:", error)
-          // Default to center coordinates if geolocation fails
           const defaultCoords: [number, number] = [43.6532, -79.3832]
           setDriverLocation(defaultCoords)
-          console.log(`Using default location: [${defaultCoords[0]}, ${defaultCoords[1]}]`)
         },
       )
     } else {
-      // Default to center coordinates
       const defaultCoords: [number, number] = [43.6532, -79.3832]
       setDriverLocation(defaultCoords)
-      console.log(`Geolocation not available, using default: [${defaultCoords[0]}, ${defaultCoords[1]}]`)
     }
   }
 
@@ -140,15 +133,9 @@ export default function DriverOrdersPage() {
     setLoading(true)
 
     try {
-      console.log("Fetching orders and route for driver:", profile.user_id)
-
-      // First, try to load persisted route state
       const persistedState = routePersistenceService.loadRouteState(profile.user_id)
 
       if (persistedState && persistedState.isOptimized && persistedState.optimizedOrders.length > 0) {
-        console.log("Loading persisted route state:", persistedState)
-
-        // Validate that the persisted orders still exist and update their status
         const orderIds = persistedState.optimizedOrders.map((order) => order.id)
         const { data: currentOrders, error } = await supabase
           .from("orders")
@@ -158,7 +145,6 @@ export default function DriverOrdersPage() {
 
         if (error) throw error
 
-        // Merge persisted order data with current status
         const updatedOptimizedOrders = persistedState.optimizedOrders
           .map((persistedOrder) => {
             const currentOrder = currentOrders.find((order) => order.id === persistedOrder.id)
@@ -166,6 +152,8 @@ export default function DriverOrdersPage() {
               return {
                 ...currentOrder,
                 stop_number: persistedOrder.stop_number,
+                route_number: persistedOrder.route_number,
+                stop_label: persistedOrder.stop_label || `S${String(persistedOrder.stop_number || 1).padStart(2, "0")}`,
                 canStart: currentOrder.status === "assigned",
                 canDeliver: currentOrder.status === "assigned",
                 canComplete: currentOrder.status === "in_transit",
@@ -191,23 +179,20 @@ export default function DriverOrdersPage() {
         return
       }
 
-      // Check for existing persistent route in database
       const existingRoute = await routeManager.getCurrentRoute(profile.user_id)
-      console.log("Existing database route found:", !!existingRoute)
 
       if (existingRoute && existingRoute.stops.length > 0) {
-        // Route exists in database - use it to maintain optimization
         const routeOrders = existingRoute.stops
-          .filter((stop) => stop.order) // Ensure order exists
+          .filter((stop) => stop.order)
           .map((stop) => ({
             ...stop.order,
             stop_number: stop.sequence,
+            route_number: existingRoute.route_number,
+            stop_label: `S${String(stop.sequence).padStart(2, "0")}`,
             canStart: stop.order.status === "assigned",
             canDeliver: stop.order.status === "assigned",
             canComplete: stop.order.status === "in_transit",
           }))
-
-        console.log("Setting optimized orders from database route:", routeOrders.length)
 
         if (routeOrders.length > 0) {
           setOrders(routeOrders)
@@ -223,40 +208,33 @@ export default function DriverOrdersPage() {
             description: `Database route with ${routeOrders.length} stops loaded successfully.`,
           })
           return
-        } else {
-          console.log("Route exists but has no valid orders, falling back to regular orders")
         }
-      } else {
-        // No route exists - fetch regular orders
-        console.log("No route found, fetching regular orders")
-
-        const { data, error } = await supabase
-          .from("orders")
-          .select("*")
-          .eq("driver_id", profile.user_id)
-          .order("created_at", { ascending: false })
-
-        if (error) throw error
-
-        const ordersWithActions = (data as Order[]).map((order) => ({
-          ...order,
-          canStart: order.status === "assigned",
-          canDeliver: order.status === "assigned",
-          canComplete: order.status === "in_transit",
-        }))
-
-        console.log("Setting regular orders:", ordersWithActions.length)
-
-        setOrders(ordersWithActions)
-        setRouteState({
-          isOptimized: false,
-          persistentRoute: null,
-          optimizedOrders: [],
-          lastOptimizedAt: null,
-        })
       }
+
+      const { data, error } = await supabase
+        .from("orders")
+        .select("*")
+        .eq("driver_id", profile.user_id)
+        .order("created_at", { ascending: false })
+
+      if (error) throw error
+
+      const ordersWithActions = (data as Order[]).map((order) => ({
+        ...order,
+        canStart: order.status === "assigned",
+        canDeliver: order.status === "assigned",
+        canComplete: order.status === "in_transit",
+      }))
+
+      setOrders(ordersWithActions)
+      setRouteState({
+        isOptimized: false,
+        persistentRoute: null,
+        optimizedOrders: [],
+        lastOptimizedAt: null,
+      })
     } catch (error) {
-      console.error("Error fetching orders and route:", error)
+      analytics.trackError(error as Error, { context: "fetchOrdersAndRoute" })
       toast({
         title: "Error",
         description: "Failed to load orders. Please try again.",
@@ -269,7 +247,6 @@ export default function DriverOrdersPage() {
   }, [profile, toast])
 
   const optimizeDeliveryRoute = async () => {
-    // Get all orders, not just filtered ones
     const allOrders = orders.filter((order) => !["delivered", "failed", "cancelled"].includes(order.status))
 
     if (allOrders.length === 0) {
@@ -291,15 +268,8 @@ export default function DriverOrdersPage() {
     }
 
     setIsOptimizing(true)
+    analytics.trackUserAction("optimize_route", { orderCount: allOrders.length, driverId: profile?.user_id })
     try {
-      console.log("Starting nearest neighbor route optimization for", allOrders.length, "orders")
-      console.log("Driver location:", driverLocation)
-      console.log(
-        "Orders to optimize:",
-        allOrders.map((o) => ({ id: o.id, number: o.order_number, status: o.status })),
-      )
-
-      // Clear any existing route first
       if (routeState.persistentRoute?.id) {
         await routeManager.safeEndRoute(routeState.persistentRoute.id)
       }
@@ -309,12 +279,9 @@ export default function DriverOrdersPage() {
         description: "Finding nearest delivery to your location and creating optimal sequence...",
       })
 
-      const newRoute = await routeManager.createOptimizedRoute(profile.user_id, allOrders)
-      console.log("New optimized route created:", newRoute)
-      console.log("Route stops:", newRoute.stops.length)
+      const newRoute = await routeManager.createOptimizedRoute(profile!.user_id, allOrders)
 
       if (newRoute.stops.length === 0) {
-        console.error("Route created with zero stops!")
         toast({
           title: "Optimization Failed",
           description: "Route was created but contains no stops. Please try again.",
@@ -326,15 +293,13 @@ export default function DriverOrdersPage() {
       const routeOrders = newRoute.stops.map((stop) => ({
         ...stop.order,
         stop_number: stop.sequence,
+        route_number: newRoute.route_number,
+        stop_label: `S${String(stop.sequence).padStart(2, "0")}`,
         canStart: stop.order.status === "assigned",
         canDeliver: stop.order.status === "assigned",
         canComplete: stop.order.status === "in_transit",
       }))
 
-      console.log("Route orders mapped:", routeOrders.length, "orders")
-      console.log("First stop (nearest to driver):", routeOrders[0]?.order_number)
-
-      // Update both orders and route state atomically
       setOrders(routeOrders)
       const newRouteState = {
         isOptimized: true,
@@ -349,10 +314,10 @@ export default function DriverOrdersPage() {
         description: `Route created starting with nearest delivery. ${newRoute.stops.length} stops in optimal sequence.`,
       })
     } catch (error) {
-      console.error("Error optimizing route:", error)
+      analytics.trackError(error as Error, { context: "optimizeDeliveryRoute" })
       toast({
         title: "Error",
-        description: `Failed to optimize route: ${error.message}`,
+        description: `Failed to optimize route: ${(error as Error).message}`,
         variant: "destructive",
       })
     } finally {
@@ -361,24 +326,20 @@ export default function DriverOrdersPage() {
   }
 
   const resetOptimization = async () => {
+    analytics.trackUserAction("reset_route_optimization", { driverId: profile?.user_id })
     try {
-      console.log("Resetting route optimization")
-
-      // Clear persisted route state first
       if (profile) {
         routePersistenceService.clearRouteState(profile.user_id)
       }
 
-      // Safely end the current route if it exists
       if (routeState.persistentRoute?.id) {
         await routeManager.safeEndRoute(routeState.persistentRoute.id)
       }
 
-      // Fetch fresh orders without optimization
       const { data, error } = await supabase
         .from("orders")
         .select("*")
-        .eq("driver_id", profile.user_id)
+        .eq("driver_id", profile!.user_id)
         .order("created_at", { ascending: false })
 
       if (error) throw error
@@ -390,7 +351,6 @@ export default function DriverOrdersPage() {
         canComplete: order.status === "in_transit",
       }))
 
-      // Reset both orders and route state
       setOrders(resetOrders)
       setRouteState({
         isOptimized: false,
@@ -404,9 +364,7 @@ export default function DriverOrdersPage() {
         description: "Orders returned to original sequence. Route optimization cleared.",
       })
     } catch (error) {
-      console.error("Error resetting route:", error)
-
-      // Even if there's an error, still reset the UI state
+      analytics.trackError(error as Error, { context: "resetOptimization" })
       if (profile) {
         routePersistenceService.clearRouteState(profile.user_id)
       }
@@ -428,9 +386,8 @@ export default function DriverOrdersPage() {
   }
 
   const updateOrderStatus = async (orderId: string, newStatus: string, notes?: string) => {
+    analytics.trackUserAction("update_order_status", { orderId, newStatus, driverId: profile?.user_id })
     try {
-      console.log("Updating order status:", orderId, "to", newStatus)
-
       const { error } = await supabase
         .from("orders")
         .update({
@@ -441,7 +398,6 @@ export default function DriverOrdersPage() {
 
       if (error) throw error
 
-      // Create order update record
       if (profile) {
         await supabase.from("order_updates").insert({
           order_id: orderId,
@@ -453,19 +409,10 @@ export default function DriverOrdersPage() {
         })
       }
 
-      // Update persistent route if delivery completed and route exists
       if (newStatus === "delivered" && routeState.persistentRoute) {
         try {
-          console.log("Updating persistent route for completed delivery")
+          const updatedRoute = await routeManager.completeDelivery(routeState.persistentRoute.id, orderId, 15, 2)
 
-          const updatedRoute = await routeManager.completeDelivery(
-            routeState.persistentRoute.id,
-            orderId,
-            15, // actual time - could be calculated
-            2, // actual distance - could be calculated
-          )
-
-          // Update both orders and route state to maintain synchronization
           const updatedOrders = orders.map((order) => {
             if (order.id === orderId) {
               return {
@@ -506,14 +453,12 @@ export default function DriverOrdersPage() {
             description: "Route updated with delivery completion.",
           })
 
-          return // Exit early to avoid duplicate state update
+          return
         } catch (routeError) {
-          console.error("Error updating route:", routeError)
-          // Continue with regular update if route update fails
+          analytics.trackError(routeError as Error, { context: "updateOrderStatus_routeUpdate" })
         }
       }
 
-      // Regular state update for non-delivery status changes or when no route exists
       const updatedOrders = orders.map((order) => {
         if (order.id === orderId) {
           const updatedOrder = { ...order, status: newStatus }
@@ -529,7 +474,6 @@ export default function DriverOrdersPage() {
 
       setOrders(updatedOrders)
 
-      // Also update optimized orders if they exist
       if (routeState.optimizedOrders.length > 0) {
         const updatedOptimizedOrders = routeState.optimizedOrders.map((order) => {
           if (order.id === orderId) {
@@ -555,7 +499,7 @@ export default function DriverOrdersPage() {
         description: `Order status updated to ${newStatus.replace("_", " ")}`,
       })
     } catch (error) {
-      console.error("Error updating order status:", error)
+      analytics.trackError(error as Error, { context: "updateOrderStatus" })
       toast({
         title: "Error",
         description: "Failed to update order status. Please try again.",
@@ -669,7 +613,6 @@ export default function DriverOrdersPage() {
       }
     >
       <div className="space-y-6">
-        {/* Quick Stats */}
         <div className="grid grid-cols-2 gap-4">
           <Card>
             <CardContent className="p-4">
@@ -689,6 +632,9 @@ export default function DriverOrdersPage() {
                 <div>
                   <p className="text-sm text-muted-foreground">Route Status</p>
                   <p className="text-sm font-medium">{routeState.isOptimized ? "Optimized" : "Standard"}</p>
+                  {routeState.persistentRoute?.route_number && (
+                    <p className="text-xs text-muted-foreground">{routeState.persistentRoute.route_number}</p>
+                  )}
                 </div>
                 <Navigation className={`h-8 w-8 ${routeState.isOptimized ? "text-green-500" : "text-gray-400"}`} />
               </div>
@@ -696,7 +642,6 @@ export default function DriverOrdersPage() {
           </Card>
         </div>
 
-        {/* Enhanced Optimization Status */}
         {routeState.isOptimized && (
           <Card className="border-green-200 bg-green-50">
             <CardContent className="p-4">
@@ -707,6 +652,9 @@ export default function DriverOrdersPage() {
                     <p className="text-sm font-medium">Route Optimized</p>
                     <p className="text-xs text-green-600">
                       {routeState.optimizedOrders.length} stops in optimal sequence
+                      {routeState.persistentRoute?.route_number && (
+                        <span className="ml-2 font-mono">({routeState.persistentRoute.route_number})</span>
+                      )}
                     </p>
                   </div>
                 </div>
@@ -724,7 +672,6 @@ export default function DriverOrdersPage() {
           </Card>
         )}
 
-        {/* Mobile-Responsive Map Widget */}
         <MobileMapWidget
           orders={routeState.optimizedOrders.length > 0 ? routeState.optimizedOrders : activeOrders}
           driverLocation={driverLocation}
@@ -732,7 +679,6 @@ export default function DriverOrdersPage() {
           title={routeState.isOptimized ? "Optimized Route Map" : "Delivery Locations"}
         />
 
-        {/* Search and Filters */}
         <Card>
           <CardContent className="p-4">
             <div className="space-y-4">
@@ -801,7 +747,6 @@ export default function DriverOrdersPage() {
           </CardContent>
         </Card>
 
-        {/* Orders Tabs */}
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
           <TabsList className="grid w-full grid-cols-3">
             <TabsTrigger value="active" className="flex items-center gap-2">
@@ -932,13 +877,18 @@ export default function DriverOrdersPage() {
           <Card key={order.id} className="hover:shadow-md transition-shadow">
             <CardContent className="p-4">
               <div className="space-y-4">
-                {/* Header */}
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     {isOptimized && order.stop_number && (
                       <div className="flex items-center gap-1 bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs font-medium">
                         <Hash className="h-3 w-3" />
-                        {order.stop_number}
+                        {order.stop_label || `S${String(order.stop_number).padStart(2, "0")}`}
+                      </div>
+                    )}
+                    {isOptimized && order.route_number && (
+                      <div className="flex items-center gap-1 bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-medium">
+                        <Navigation className="h-3 w-3" />
+                        {order.route_number}
                       </div>
                     )}
                     <h3 className="font-semibold">#{order.order_number}</h3>
@@ -949,7 +899,6 @@ export default function DriverOrdersPage() {
                   </div>
                 </div>
 
-                {/* Customer & Address Info */}
                 <div className="space-y-2">
                   <div className="flex items-center gap-2">
                     <User className="h-4 w-4 text-muted-foreground" />
@@ -970,7 +919,6 @@ export default function DriverOrdersPage() {
                   </div>
                 </div>
 
-                {/* Delivery Notes */}
                 {order.delivery_notes && (
                   <div className="p-3 bg-blue-50 rounded-lg">
                     <p className="text-sm">
@@ -979,7 +927,6 @@ export default function DriverOrdersPage() {
                   </div>
                 )}
 
-                {/* Action Buttons */}
                 <div className="flex flex-wrap gap-2 pt-2 border-t">
                   <Button variant="outline" size="sm" onClick={() => onViewDetails(order.id)}>
                     View
@@ -990,7 +937,6 @@ export default function DriverOrdersPage() {
                     Navigate
                   </Button>
 
-                  {/* Status-specific actions */}
                   {showActions && onStatusUpdate && (
                     <>
                       {order.canStart && (
@@ -1016,7 +962,6 @@ export default function DriverOrdersPage() {
                     </>
                   )}
 
-                  {/* Completed order actions */}
                   {order.status === "delivered" && onViewPOD && (
                     <Button variant="outline" size="sm" onClick={() => onViewPOD(order.id)}>
                       <Camera className="mr-1 h-3 w-3" />
@@ -1024,7 +969,6 @@ export default function DriverOrdersPage() {
                     </Button>
                   )}
 
-                  {/* Failed order actions */}
                   {order.status === "failed" && onRetry && (
                     <Button variant="outline" size="sm" onClick={() => onRetry(order.id)}>
                       <RotateCcw className="mr-1 h-3 w-3" />

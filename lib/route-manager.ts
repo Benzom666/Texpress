@@ -1,1256 +1,837 @@
-import { supabase } from "./supabase"
-import { geocodingService } from "./geocoding-service"
-import { routeOptimizer } from "./route-optimizer"
-import { distanceCalculator } from "./distance-calculator"
+import { supabase } from "@/lib/supabase"
 
-// Add these new interfaces at the top of the file after existing imports
-interface DynamicDeliveryStop {
-  id: string
+interface OptimizedStop {
+  stopNumber: number
+  stopLabel: string
+  orderId: string
   coordinates: [number, number]
-  timeWindow?: {
-    start: Date
-    end: Date
-    priority: "urgent" | "high" | "normal" | "low"
-  }
-  estimatedServiceTime: number
-  packageWeight?: number
-  priority: "urgent" | "high" | "normal" | "low"
-  specialRequirements?: string[]
-  order: any
-}
-
-interface VehicleConstraints {
-  maxCapacity: number
-  currentLoad: number
-  maxDeliveries: number
-  workingHours: { start: Date; end: Date }
-}
-
-export interface RouteStop {
-  order: any
   estimatedTime: number
   distance: number
-  type: "delivery"
-  status: "pending" | "completed" | "failed" | "cancelled"
-  completedAt?: string
-  actualTime?: number
-  actualDistance?: number
-  sequence: number
-  coordinates?: [number, number]
-  clusterGroup?: number
-  optimizationScore?: number
 }
 
-export interface RouteHistory {
-  id: string
-  timestamp: string
-  action: "created" | "updated" | "completed" | "cancelled" | "recalculated"
-  description: string
-  stopCount: number
+interface CreateRouteParams {
+  routeName: string
+  stops: OptimizedStop[]
   totalDistance: number
   totalTime: number
-  metadata?: any
+  createdBy: string
+  driverId?: string
 }
 
-export interface PersistentRoute {
+interface Route {
   id: string
-  driverId: string
-  shiftDate: string
-  status: "active" | "completed" | "cancelled"
-  stops: RouteStop[]
-  history: RouteHistory[]
-  totalDistance: number
-  totalTime: number
-  completedDistance: number
-  completedTime: number
-  createdAt: string
-  updatedAt: string
-  centerLocation: [number, number]
-  optimizationMetrics?: {
-    algorithm: string
-    totalDistance: number
-    averageSegmentDistance: number
-    longestSegment: number
-    shortestSegment: number
-    clusteringScore: number
-    improvement: number
+  route_number: string
+  route_name: string
+  status: string
+  total_distance: number
+  estimated_duration: number
+  driver_id?: string
+  created_by: string
+  created_at: string
+  updated_at: string
+}
+
+interface RouteStop {
+  id: string
+  route_id: string
+  order_id: string
+  stop_number: number
+  coordinates: [number, number]
+  estimated_time: number
+  distance_from_previous: number
+  status: string
+  actual_arrival_time?: string
+  notes?: string
+}
+
+interface TableSchema {
+  [columnName: string]: {
+    data_type: string
+    is_nullable: string
+    column_default?: string
   }
 }
 
-class RouteManager {
-  private readonly DEFAULT_CENTER: [number, number] = [43.6532, -79.3832] // Default center
-  private readonly DEFAULT_DEPOT: [number, number] = [43.6426, -79.3871] // Default depot location
+export class RouteManager {
+  private static schemaCache: { [tableName: string]: TableSchema } = {}
 
-  // Calculate distance between two coordinates (Haversine formula)
-  private calculateDistance(coord1: [number, number], coord2: [number, number]): number {
-    const [lat1, lon1] = coord1
-    const [lat2, lon2] = coord2
-    const R = 6371 // Earth's radius in kilometers
-
-    const dLat = (lat2 - lat1) * (Math.PI / 180)
-    const dLon = (lon2 - lon1) * (Math.PI / 180)
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * Math.sin(dLon / 2) * Math.sin(dLon / 2)
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-    return R * c
-  }
-
-  // Enhanced geocoding with proper address handling
-  private async geocodeOrderAddresses(orders: any[]): Promise<Map<string, [number, number]>> {
-    const addressMap = new Map<string, [number, number]>()
-
-    if (orders.length === 0) {
-      console.log("No orders to geocode")
-      return addressMap
-    }
-
-    const addresses = orders.map((order) => order.delivery_address).filter((addr) => addr && addr.trim().length > 0)
-
-    console.log(`Geocoding ${addresses.length} addresses for route optimization`)
-
-    if (addresses.length === 0) {
-      console.warn("No valid addresses found in orders")
-      // Generate fallback coordinates for all orders
-      orders.forEach((order, index) => {
-        if (order.delivery_address) {
-          const fallbackCoords = this.generateFallbackCoordinates(order.delivery_address, index)
-          addressMap.set(order.delivery_address, fallbackCoords)
-        }
-      })
-      return addressMap
+  /**
+   * Get the actual schema of a table from the database
+   */
+  static async getTableSchema(tableName: string): Promise<TableSchema> {
+    if (this.schemaCache[tableName]) {
+      return this.schemaCache[tableName]
     }
 
     try {
-      const geocodedResults = await geocodingService.geocodeWithFallback(addresses)
+      const { data, error } = await supabase.rpc("get_table_schema", { table_name: tableName })
 
-      geocodedResults.forEach((result, index) => {
-        if (result.coordinates) {
-          const originalOrder = orders.find((o) => o.delivery_address === addresses[index])
-          if (originalOrder) {
-            addressMap.set(originalOrder.delivery_address, result.coordinates)
-            console.log(
-              `Mapped address: ${originalOrder.delivery_address} -> [${result.coordinates[0]}, ${result.coordinates[1]}] (${result.city})`,
-            )
+      if (error) {
+        console.warn(`Could not get schema for ${tableName}, using fallback method:`, error)
+        return await this.getTableSchemaFallback(tableName)
+      }
+
+      const schema: TableSchema = {}
+      if (data && Array.isArray(data)) {
+        data.forEach((col: any) => {
+          schema[col.column_name] = {
+            data_type: col.data_type,
+            is_nullable: col.is_nullable,
+            column_default: col.column_default,
           }
-        }
-      })
-
-      console.log(`Successfully geocoded ${addressMap.size}/${orders.length} addresses`)
-    } catch (error) {
-      console.error("Error geocoding addresses:", error)
-    }
-
-    // Generate fallback coordinates for any orders that weren't geocoded
-    orders.forEach((order, index) => {
-      if (order.delivery_address && !addressMap.has(order.delivery_address)) {
-        const fallbackCoords = this.generateFallbackCoordinates(order.delivery_address, index)
-        addressMap.set(order.delivery_address, fallbackCoords)
-        console.log(`Generated fallback for: ${order.delivery_address} -> [${fallbackCoords[0]}, ${fallbackCoords[1]}]`)
-      }
-    })
-
-    return addressMap
-  }
-
-  // Generate fallback coordinates
-  private generateFallbackCoordinates(address: string, index: number): [number, number] {
-    // Use address hash for consistent positioning
-    let hash = 0
-    for (let i = 0; i < address.length; i++) {
-      const char = address.charCodeAt(i)
-      hash = (hash << 5) - hash + char
-      hash = hash & hash
-    }
-
-    const normalizedHash = Math.abs(hash) / 2147483647
-
-    // Generate coordinates around the default center
-    const latRange = 0.28
-    const lonRange = 0.52
-
-    const lat = this.DEFAULT_CENTER[0] - latRange / 2 + normalizedHash * latRange + ((index * 0.001) % latRange)
-    const lon = this.DEFAULT_CENTER[1] - lonRange / 2 + normalizedHash * 0.7 * lonRange + ((index * 0.001) % lonRange)
-
-    return [lat, lon]
-  }
-
-  // Get driver's current location using Geolocation API
-  private async getDriverLocation(): Promise<[number, number] | null> {
-    return new Promise((resolve, reject) => {
-      if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(
-          (position) => {
-            const coords: [number, number] = [position.coords.latitude, position.coords.longitude]
-            console.log(`Driver location detected: [${coords[0]}, ${coords[1]}]`)
-            resolve(coords)
-          },
-          (error) => {
-            console.log("Geolocation error:", error)
-            resolve(null)
-          },
-        )
-      } else {
-        console.log("Geolocation not available")
-        resolve(null)
-      }
-    })
-  }
-
-  // Calculate average coordinates of delivery addresses
-  private async calculateAverageCoordinates(orders: any[]): Promise<[number, number]> {
-    let totalLat = 0
-    let totalLon = 0
-    let validCoordsCount = 0
-
-    const addressCoordinates = await this.geocodeOrderAddresses(orders)
-
-    for (const order of orders) {
-      const coords = addressCoordinates.get(order.delivery_address)
-      if (coords) {
-        totalLat += coords[0]
-        totalLon += coords[1]
-        validCoordsCount++
-      }
-    }
-
-    if (validCoordsCount > 0) {
-      const avgLat = totalLat / validCoordsCount
-      const avgLon = totalLon / validCoordsCount
-      console.log(`Calculated average coordinates: [${avgLat}, ${avgLon}]`)
-      return [avgLat, avgLon]
-    } else {
-      console.log("No valid coordinates found, using default center")
-      return this.DEFAULT_CENTER
-    }
-  }
-
-  // Enhanced route optimization with multiple algorithms and real-world distance calculation
-  private async optimizeRoute(orders: any[], startLocation: [number, number]): Promise<RouteStop[]> {
-    if (orders.length === 0) {
-      console.log("No orders to optimize")
-      return []
-    }
-
-    console.log(`Starting nearest neighbor route optimization for ${orders.length} orders`)
-    console.log(`Driver starting location: [${startLocation[0]}, ${startLocation[1]}]`)
-    console.log(
-      "Orders to optimize:",
-      orders.map((o) => ({
-        id: o.id,
-        number: o.order_number,
-        address: o.delivery_address,
-        status: o.status,
-      })),
-    )
-
-    // Validate orders have required fields
-    const validOrders = orders.filter(
-      (order) => order.id && order.delivery_address && order.delivery_address.trim().length > 0,
-    )
-
-    if (validOrders.length === 0) {
-      console.error("No valid orders found after filtering")
-      return []
-    }
-
-    if (validOrders.length < orders.length) {
-      console.warn(`Filtered out ${orders.length - validOrders.length} invalid orders`)
-    }
-
-    // Get real coordinates for all addresses
-    const addressCoordinates = await this.geocodeOrderAddresses(validOrders)
-    console.log("Address coordinates:", addressCoordinates.size, "addresses geocoded")
-
-    if (addressCoordinates.size === 0) {
-      console.error("No addresses could be geocoded")
-      return []
-    }
-
-    // Convert orders to dynamic delivery stops
-    const deliveryStops: DynamicDeliveryStop[] = []
-
-    for (let index = 0; index < validOrders.length; index++) {
-      const order = validOrders[index]
-      const coords = addressCoordinates.get(order.delivery_address)
-
-      if (!coords) {
-        console.warn(`Could not find coordinates for address: ${order.delivery_address}`)
-        continue
-      }
-
-      // Parse delivery time window if available
-      let timeWindow
-      if (order.delivery_window_start && order.delivery_window_end) {
-        timeWindow = {
-          start: new Date(order.delivery_window_start),
-          end: new Date(order.delivery_window_end),
-          priority: order.priority || "normal",
-        }
-      }
-
-      deliveryStops.push({
-        id: order.id,
-        coordinates: coords,
-        timeWindow,
-        estimatedServiceTime: this.calculateDeliveryTime(order),
-        packageWeight: order.package_weight || 1,
-        priority: order.priority || "normal",
-        specialRequirements: order.special_requirements ? order.special_requirements.split(",") : [],
-        order,
-      })
-    }
-
-    console.log("Created", deliveryStops.length, "delivery stops")
-
-    if (deliveryStops.length === 0) {
-      console.error("No delivery stops created")
-      return []
-    }
-
-    // Define vehicle constraints
-    const vehicleConstraints: VehicleConstraints = {
-      maxCapacity: 50,
-      currentLoad: 0,
-      maxDeliveries: 20,
-      workingHours: {
-        start: new Date(),
-        end: new Date(Date.now() + 8 * 60 * 60 * 1000),
-      },
-    }
-
-    // Run nearest neighbor optimization starting from driver location
-    try {
-      console.log("Running nearest neighbor optimization starting from driver location...")
-
-      const optimizationResult = await routeOptimizer.optimizeDeliveryRoute(
-        startLocation,
-        deliveryStops,
-        vehicleConstraints,
-        new Date(),
-      )
-
-      console.log(`Nearest neighbor optimization completed:`)
-      console.log(`- Algorithm: ${optimizationResult.algorithm}`)
-      console.log(`- Total distance: ${optimizationResult.totalDistance.toFixed(2)} km`)
-      console.log(`- Total time: ${optimizationResult.totalTime.toFixed(1)} minutes`)
-      console.log(`- Route length: ${optimizationResult.route.length}`)
-      console.log(`- Route sequence: [${optimizationResult.route.join(" -> ")}]`)
-
-      if (optimizationResult.route.length === 0) {
-        console.error("Optimization returned empty route")
-        throw new Error("Optimization returned empty route")
-      }
-
-      // Convert back to RouteStop objects with proper sequencing
-      const stops: RouteStop[] = []
-      let cumulativeDistance = 0
-
-      for (let i = 0; i < optimizationResult.route.length; i++) {
-        const deliveryIndex = optimizationResult.route[i]
-        const delivery = deliveryStops[deliveryIndex]
-
-        if (!delivery) {
-          console.warn(`Missing delivery at index ${deliveryIndex}`)
-          continue
-        }
-
-        // Calculate segment distance
-        const prevLocation = i === 0 ? startLocation : deliveryStops[optimizationResult.route[i - 1]].coordinates
-        const segmentDistance = distanceCalculator.calculateRealWorldDistance(prevLocation, delivery.coordinates)
-        cumulativeDistance += segmentDistance
-
-        // Get estimated arrival time and traffic adjustment
-        const estimatedArrival = optimizationResult.estimatedArrivalTimes[i] || new Date()
-        const trafficAdjustment = optimizationResult.trafficAdjustments[i] || 1.0
-
-        stops.push({
-          order: delivery.order,
-          estimatedTime: delivery.estimatedServiceTime,
-          distance: segmentDistance,
-          type: "delivery",
-          status: "pending",
-          sequence: i + 1,
-          coordinates: delivery.coordinates,
-          optimizationScore: this.calculateDynamicOptimizationScore(
-            delivery,
-            estimatedArrival,
-            trafficAdjustment,
-            i,
-            optimizationResult.route.length,
-          ),
         })
-
-        console.log(
-          `Stop ${i + 1}: Order ${delivery.order.order_number} at [${delivery.coordinates[0]}, ${delivery.coordinates[1]}], distance: ${segmentDistance.toFixed(2)}km`,
-        )
       }
 
-      console.log("Created", stops.length, "route stops with nearest neighbor optimization")
-      console.log(`Total optimized distance: ${cumulativeDistance.toFixed(2)}km`)
-
-      if (stops.length === 0) {
-        console.error("No route stops created from optimization result")
-        throw new Error("No route stops created from optimization result")
-      }
-
-      return stops
+      this.schemaCache[tableName] = schema
+      return schema
     } catch (error) {
-      console.error("Error in route optimization:", error)
+      console.warn(`Error getting schema for ${tableName}:`, error)
+      return await this.getTableSchemaFallback(tableName)
+    }
+  }
+
+  /**
+   * Fallback method to get table schema by attempting a select
+   */
+  static async getTableSchemaFallback(tableName: string): Promise<TableSchema> {
+    try {
+      // Try to select from the table with limit 0 to get column info
+      const { data, error } = await supabase.from(tableName).select("*").limit(0)
+
+      if (error) {
+        console.error(`Fallback schema check failed for ${tableName}:`, error)
+        return {}
+      }
+
+      // Return known schema for route_stops
+      if (tableName === "route_stops") {
+        return {
+          id: { data_type: "uuid", is_nullable: "NO" },
+          route_id: { data_type: "uuid", is_nullable: "NO" },
+          order_id: { data_type: "uuid", is_nullable: "NO" },
+          stop_number: { data_type: "integer", is_nullable: "NO" },
+          sequence_order: { data_type: "integer", is_nullable: "NO" },
+          stop_label: { data_type: "text", is_nullable: "YES" },
+          address: { data_type: "text", is_nullable: "YES" },
+          latitude: { data_type: "numeric", is_nullable: "YES" },
+          longitude: { data_type: "numeric", is_nullable: "YES" },
+          estimated_time: { data_type: "integer", is_nullable: "YES" },
+          distance_from_previous: { data_type: "numeric", is_nullable: "YES" },
+          status: { data_type: "text", is_nullable: "YES" },
+          actual_arrival_time: { data_type: "timestamp with time zone", is_nullable: "YES" },
+          actual_departure_time: { data_type: "timestamp with time zone", is_nullable: "YES" },
+          notes: { data_type: "text", is_nullable: "YES" },
+          created_at: { data_type: "timestamp with time zone", is_nullable: "YES" },
+          updated_at: { data_type: "timestamp with time zone", is_nullable: "YES" },
+        }
+      }
+
+      return {}
+    } catch (error) {
+      console.error(`Fallback schema check error for ${tableName}:`, error)
+      return {}
+    }
+  }
+
+  /**
+   * Comprehensive database structure verification
+   */
+  static async verifyDatabaseStructure(): Promise<{ valid: boolean; error?: string }> {
+    try {
+      console.log("Verifying database structure...")
+
+      // Check routes table
+      const { data: routesTest, error: routesError } = await supabase.from("routes").select("id, route_name").limit(1)
+
+      if (routesError) {
+        console.error("Routes table verification failed:", routesError)
+        return {
+          valid: false,
+          error: `Routes table is not accessible: ${routesError.message}. Please run migration scripts.`,
+        }
+      }
+
+      // Check route_stops table
+      const { data: stopsTest, error: stopsError } = await supabase
+        .from("route_stops")
+        .select("id, route_id, order_id")
+        .limit(1)
+
+      if (stopsError) {
+        console.error("Route_stops table verification failed:", stopsError)
+        return {
+          valid: false,
+          error: `Route_stops table is not accessible: ${stopsError.message}. Please run migration scripts.`,
+        }
+      }
+
+      // Check orders table
+      const { data: ordersTest, error: ordersError } = await supabase.from("orders").select("id").limit(1)
+
+      if (ordersError) {
+        console.error("Orders table verification failed:", ordersError)
+        return {
+          valid: false,
+          error: `Orders table is not accessible: ${ordersError.message}`,
+        }
+      }
+
+      console.log("Database structure verification passed")
+      return { valid: true }
+    } catch (error) {
+      console.error("Database structure verification failed:", error)
+      return {
+        valid: false,
+        error: `Database verification error: ${error instanceof Error ? error.message : "Unknown error"}`,
+      }
+    }
+  }
+
+  /**
+   * Get order details including address for route stops
+   */
+  static async getOrderDetails(orderIds: string[]): Promise<{ [orderId: string]: any }> {
+    try {
+      const { data: orders, error } = await supabase
+        .from("orders")
+        .select("id, order_number, customer_name, delivery_address, coordinates, priority")
+        .in("id", orderIds)
+
+      if (error) {
+        console.error("Error fetching order details:", error)
+        return {}
+      }
+
+      const orderMap: { [orderId: string]: any } = {}
+      orders?.forEach((order) => {
+        orderMap[order.id] = order
+      })
+
+      return orderMap
+    } catch (error) {
+      console.error("Error in getOrderDetails:", error)
+      return {}
+    }
+  }
+
+  /**
+   * Validate that all order IDs exist in the database
+   */
+  static async validateOrderIds(orderIds: string[]): Promise<string[]> {
+    try {
+      const { data: orders, error } = await supabase
+        .from("orders")
+        .select("id")
+        .in("id", orderIds)
+
+      if (error) {
+        console.error("Error validating order IDs:", error)
+        return []
+      }
+
+      const validIds = orders?.map((order) => order.id) || []
+      const invalidIds = orderIds.filter((id) => !validIds.includes(id))
+
+      if (invalidIds.length > 0) {
+        console.warn("Invalid order IDs found:", invalidIds)
+      }
+
+      return validIds
+    } catch (error) {
+      console.error("Error in validateOrderIds:", error)
+      return []
+    }
+  }
+
+  /**
+   * Create a route stop object with proper data validation and null handling
+   */
+  static createRouteStopData(stop: OptimizedStop, routeId: string, orderDetails: { [orderId: string]: any }): any {
+    const order = orderDetails[stop.orderId]
+
+    // Ensure we have a valid address, use fallback if needed
+    let address = order?.delivery_address
+    if (!address || address.trim() === "") {
+      address = `Stop ${stop.stopNumber} - Address not available`
+      console.warn(`No address found for order ${stop.orderId}, using fallback: ${address}`)
+    }
+
+    // Ensure we have valid coordinates
+    let latitude = null
+    let longitude = null
+
+    if (stop.coordinates && Array.isArray(stop.coordinates) && stop.coordinates.length >= 2) {
+      latitude = Number.parseFloat(stop.coordinates[0].toString())
+      longitude = Number.parseFloat(stop.coordinates[1].toString())
+
+      // Validate coordinates are reasonable
+      if (
+        isNaN(latitude) ||
+        isNaN(longitude) ||
+        latitude < -90 ||
+        latitude > 90 ||
+        longitude < -180 ||
+        longitude > 180
+      ) {
+        console.warn(`Invalid coordinates for stop ${stop.stopNumber}:`, stop.coordinates)
+        latitude = null
+        longitude = null
+      }
+    }
+
+    // If no coordinates from stop, try to get from order
+    if (!latitude || !longitude) {
+      if (order?.coordinates) {
+        try {
+          // Handle PostgreSQL POINT format or array format
+          if (typeof order.coordinates === "string") {
+            const coords = order.coordinates.replace(/[()]/g, "").split(",")
+            if (coords.length >= 2) {
+              latitude = Number.parseFloat(coords[0])
+              longitude = Number.parseFloat(coords[1])
+            }
+          } else if (Array.isArray(order.coordinates) && order.coordinates.length >= 2) {
+            latitude = Number.parseFloat(order.coordinates[0])
+            longitude = Number.parseFloat(order.coordinates[1])
+          }
+        } catch (error) {
+          console.warn(`Error parsing order coordinates for ${stop.orderId}:`, error)
+        }
+      }
+    }
+
+    const stopData = {
+      route_id: routeId,
+      order_id: stop.orderId,
+      stop_number: stop.stopNumber,
+      sequence_order: stop.stopNumber,
+      stop_label: stop.stopLabel || `Stop ${stop.stopNumber}`,
+      address: address,
+      latitude: latitude,
+      longitude: longitude,
+      estimated_time: Math.max(1, Math.round(stop.estimatedTime)) || 15,
+      distance_from_previous: Math.max(0, Math.round(stop.distance * 100) / 100) || 0,
+      status: "pending",
+    }
+
+    console.log(`Created stop data for ${stop.stopNumber}:`, {
+      orderId: stopData.order_id,
+      address: stopData.address,
+      hasCoordinates: !!(latitude && longitude),
+      estimatedTime: stopData.estimated_time,
+    })
+
+    return stopData
+  }
+
+  /**
+   * Generate a unique route number - Fixed to ensure TEXT format
+   */
+  static async generateRouteNumber(): Promise<string> {
+    try {
+      console.log("Generating route number...")
+
+      // Try to use the database function first
+      const { data, error } = await supabase.rpc("generate_route_number")
+
+      if (!error && data && typeof data === "string") {
+        console.log("Generated route number via database function:", data)
+        return data
+      }
+
+      console.warn("Database function failed or returned invalid data, using manual generation:", error)
+
+      // Fallback to manual generation
+      const date = new Date()
+      const dateStr = date.getFullYear().toString() +
+        (date.getMonth() + 1).toString().padStart(2, "0") +
+        date.getDate().toString().padStart(2, "0")
+
+      let counter = 1
+      let routeNumber: string
+      const maxAttempts = 100
+
+      do {
+        routeNumber = `RT${dateStr}-${counter.toString().padStart(3, "0")}`
+
+        const { data: existing, error: checkError } = await supabase
+          .from("routes")
+          .select("id")
+          .eq("route_number", routeNumber)
+          .maybeSingle()
+
+        if (checkError) {
+          console.error("Error checking route number existence:", checkError)
+          break
+        }
+
+        if (!existing) {
+          console.log("Generated unique route number manually:", routeNumber)
+          return routeNumber
+        }
+
+        counter++
+      } while (counter <= maxAttempts)
+
+      // Ultimate fallback using timestamp
+      const timestamp = Date.now()
+      const fallbackNumber = `RT${dateStr}-${timestamp.toString().slice(-6)}`
+      console.log("Using timestamp-based fallback route number:", fallbackNumber)
+      return fallbackNumber
+    } catch (error) {
+      console.error("Error in route number generation:", error)
+      const emergency = `RT${Date.now()}-${Math.random().toString(36).substr(2, 3).toUpperCase()}`
+      console.log("Using emergency fallback route number:", emergency)
+      return emergency
+    }
+  }
+
+  static async createRoute(params: CreateRouteParams): Promise<string> {
+    const { routeName, stops, totalDistance, totalTime, createdBy, driverId } = params
+
+    try {
+      console.log("=== STARTING ROUTE CREATION ===")
+      console.log("Route params:", {
+        routeName,
+        stopsCount: stops.length,
+        totalDistance,
+        totalTime,
+        createdBy,
+        driverId,
+      })
+
+      // Validate required parameters
+      if (!routeName || !createdBy) {
+        throw new Error("Route name and created_by are required")
+      }
+
+      if (!stops || stops.length === 0) {
+        throw new Error("At least one stop is required")
+      }
+
+      // Comprehensive database structure verification
+      console.log("Verifying database structure...")
+      const dbCheck = await this.verifyDatabaseStructure()
+      if (!dbCheck.valid) {
+        throw new Error(dbCheck.error || "Database structure verification failed")
+      }
+      console.log("Database structure verification: PASSED")
+
+      // Validate order IDs exist
+      console.log("Validating order IDs...")
+      const orderIds = stops.map((stop) => stop.orderId)
+      const validOrderIds = await this.validateOrderIds(orderIds)
+
+      if (validOrderIds.length === 0) {
+        throw new Error("No valid order IDs found")
+      }
+
+      if (validOrderIds.length < orderIds.length) {
+        console.warn(`Only ${validOrderIds.length} of ${orderIds.length} order IDs are valid`)
+      }
+
+      // Filter stops to only include valid orders
+      const validStops = stops.filter((stop) => validOrderIds.includes(stop.orderId))
+      console.log(`Using ${validStops.length} valid stops`)
+
+      // Get order details for addresses
+      console.log("Fetching order details...")
+      const orderDetails = await this.getOrderDetails(validOrderIds)
+      console.log("Retrieved order details for", Object.keys(orderDetails).length, "orders")
+
+      // Generate a unique route number - ENSURE IT'S A STRING
+      const routeNumber = await this.generateRouteNumber()
+      console.log("Generated route number (string):", routeNumber, typeof routeNumber)
+
+      // Validate route number is a string
+      if (typeof routeNumber !== "string" || routeNumber.trim() === "") {
+        throw new Error("Failed to generate valid route number")
+      }
+
+      // Create the route record with all required fields
+      const routeData = {
+        route_number: routeNumber, // Ensure this is a string
+        route_name: routeName,
+        status: "planned" as const,
+        total_distance: Math.round(totalDistance * 100) / 100,
+        estimated_duration: Math.round(totalTime),
+        created_by: createdBy,
+        total_stops: validStops.length,
+        driver_id: driverId || null,
+      }
+
+      console.log("Creating route with data:", routeData)
+      console.log("Route number type check:", typeof routeData.route_number, routeData.route_number)
+
+      // Create the route
+      const { data: route, error: routeError } = await supabase
+        .from("routes")
+        .insert(routeData)
+        .select("id, route_number, route_name")
+        .single()
+
+      if (routeError) {
+        console.error("Route creation failed:", routeError)
+        throw new Error(`Failed to create route: ${routeError.message}`)
+      }
+
+      if (!route || !route.id) {
+        throw new Error("No route data returned from database")
+      }
+
+      console.log("Route created successfully:", route)
+
+      // Create route stops with proper error handling and validation
+      console.log("Creating route stops...")
+      const routeStops = validStops.map((stop) => this.createRouteStopData(stop, route.id, orderDetails))
+
+      console.log("Route stops data prepared:", routeStops.length)
+      console.log("Sample route stop:", routeStops[0])
+
+      // Validate all stops have required data
+      const invalidStops = routeStops.filter((stop) => !stop.address || stop.address.trim() === "")
+      if (invalidStops.length > 0) {
+        console.error("Found stops with invalid addresses:", invalidStops)
+        throw new Error(`${invalidStops.length} stops have invalid addresses`)
+      }
+
+      // Insert route stops with comprehensive error handling
+      const { data: createdStops, error: stopsError } = await supabase
+        .from("route_stops")
+        .insert(routeStops)
+        .select("id")
+
+      if (stopsError) {
+        console.error("Route stops creation failed:", stopsError)
+        console.error("Route stops data that failed:", routeStops)
+
+        // Clean up the route on failure
+        try {
+          console.log("Cleaning up route due to stops creation failure...")
+          await supabase.from("routes").delete().eq("id", route.id)
+          console.log("Route cleanup completed")
+        } catch (cleanupError) {
+          console.error("Error during route cleanup:", cleanupError)
+        }
+
+        throw new Error(`Failed to create route stops: ${stopsError.message}`)
+      }
+
+      console.log("Route stops created successfully:", createdStops?.length || 0)
+
+      // Update orders to reference this route - FIXED: Ensure route_number is string
+      console.log("Updating orders with route information...")
+      console.log("Route number being assigned to orders:", route.route_number, typeof route.route_number)
+
+      const orderUpdateData = {
+        route_id: route.id,
+        route_number: String(route.route_number), // Explicitly convert to string
+        assigned_driver_id: driverId || null,
+      }
+
+      console.log("Order update data:", orderUpdateData)
+
+      const { error: updateError } = await supabase
+        .from("orders")
+        .update(orderUpdateData)
+        .in("id", validOrderIds)
+
+      if (updateError) {
+        console.error("Error updating orders with route_id:", updateError)
+        // This is not critical for route creation, so we'll log but not fail
+        console.warn("Route created successfully but failed to update orders:", updateError.message)
+      } else {
+        console.log("Orders updated successfully with route information")
+      }
+
+      console.log("=== ROUTE CREATION COMPLETED SUCCESSFULLY ===")
+      console.log(`Created route ${route.route_number} with ${validStops.length} stops`)
+      return route.id
+    } catch (error) {
+      console.error("=== ROUTE CREATION FAILED ===")
+      console.error("RouteManager.createRoute error:", error)
       throw error
     }
   }
 
-  // Calculate delivery time based on order characteristics
-  private calculateDeliveryTime(order: any): number {
-    let baseTime = 10 // Base delivery time in minutes
-
-    // Adjust based on order priority
-    switch (order.priority) {
-      case "urgent":
-        baseTime += 5 // Extra time for careful handling
-        break
-      case "high":
-        baseTime += 2
-        break
-      case "low":
-        baseTime -= 2
-        break
-    }
-
-    // Adjust based on delivery notes complexity
-    if (order.delivery_notes && order.delivery_notes.length > 100) {
-      baseTime += 3 // Extra time for complex instructions
-    }
-
-    // Add random variation (±2 minutes)
-    baseTime += (Math.random() - 0.5) * 4
-
-    return Math.max(baseTime, 5) // Minimum 5 minutes
-  }
-
-  // Calculate optimization score for individual stops
-  private calculateOptimizationScore(
-    order: any,
-    coordinates: [number, number],
-    allCoordinates: [number, number][],
-    route: number[],
-    position: number,
-  ): number {
-    let score = 100 // Base score
-
-    // Penalty for long segments
-    if (position > 0) {
-      const prevCoords = allCoordinates[route[position - 1]]
-      const distance = distanceCalculator.calculateRealWorldDistance(prevCoords, coordinates)
-      if (distance > 10) score -= 20 // Penalty for segments > 10km
-      if (distance > 20) score -= 30 // Additional penalty for segments > 20km
-    }
-
-    // Bonus for priority orders being early in route
-    const routeProgress = position / route.length
-    switch (order.priority) {
-      case "urgent":
-        score += (1 - routeProgress) * 20 // Up to 20 point bonus for early delivery
-        break
-      case "high":
-        score += (1 - routeProgress) * 10
-        break
-    }
-
-    // Bonus for good clustering (nearby stops)
-    let nearbyCount = 0
-    for (let i = Math.max(1, position - 2); i <= Math.min(route.length - 1, position + 2); i++) {
-      if (i !== position) {
-        const otherCoords = allCoordinates[route[i]]
-        const distance = distanceCalculator.calculateRealWorldDistance(coordinates, otherCoords)
-        if (distance < 5) nearbyCount++ // Within 5km
-      }
-    }
-    score += nearbyCount * 5 // 5 points per nearby stop
-
-    return Math.max(0, Math.min(100, score))
-  }
-
-  // Add this new method for dynamic optimization scoring
-  private calculateDynamicOptimizationScore(
-    delivery: DynamicDeliveryStop,
-    estimatedArrival: Date,
-    trafficAdjustment: number,
-    position: number,
-    totalStops: number,
-  ): number {
-    let score = 100
-
-    // Position efficiency (earlier positions get bonus for urgent deliveries)
-    const positionRatio = position / totalStops
-    switch (delivery.priority) {
-      case "urgent":
-        score += (1 - positionRatio) * 30
-        break
-      case "high":
-        score += (1 - positionRatio) * 20
-        break
-      case "normal":
-        score += (1 - positionRatio) * 10
-        break
-    }
-
-    // Time window compliance
-    if (delivery.timeWindow) {
-      if (estimatedArrival <= delivery.timeWindow.end) {
-        score += 25 // On time bonus
-
-        // Early arrival bonus (but not too early)
-        const timeToWindow = delivery.timeWindow.start.getTime() - estimatedArrival.getTime()
-        const hoursEarly = timeToWindow / (1000 * 60 * 60)
-
-        if (hoursEarly >= 0 && hoursEarly <= 1) {
-          score += 15 // Perfect timing
-        } else if (hoursEarly > 1) {
-          score -= hoursEarly * 5 // Penalty for being too early
-        }
-      } else {
-        score -= 40 // Late penalty
-      }
-    }
-
-    // Traffic efficiency
-    if (trafficAdjustment > 1.2) {
-      score -= (trafficAdjustment - 1.0) * 20 // Penalty for heavy traffic
-    } else if (trafficAdjustment < 1.1) {
-      score += 10 // Bonus for light traffic
-    }
-
-    // Special requirements penalty (more complex deliveries)
-    if (delivery.specialRequirements && delivery.specialRequirements.length > 0) {
-      score -= delivery.specialRequirements.length * 5
-    }
-
-    return Math.max(0, Math.min(100, score))
-  }
-
-  // Check if required tables exist
-  private async checkTablesExist(): Promise<boolean> {
+  /**
+   * Assign driver to route - Updated to use direct database calls instead of API
+   */
+  static async assignDriverToRoute(routeId: string, driverId: string): Promise<boolean> {
     try {
-      const { error } = await supabase.from("driver_routes").select("id").limit(1)
-      return !error
+      console.log(`🚛 RouteManager: Assigning driver ${driverId} to route ${routeId}`)
+
+      // Verify the driver exists and is available
+      const { data: driver, error: driverError } = await supabase
+        .from('user_profiles')
+        .select('id, first_name, last_name, email, role, availability_status')
+        .eq('id', driverId)
+        .eq('role', 'driver')
+        .single()
+
+      if (driverError || !driver) {
+        console.error('❌ RouteManager: Driver not found:', driverError)
+        return false
+      }
+
+      // Check if driver is available (handle missing column gracefully)
+      const driverStatus = driver.availability_status || 'available'
+      if (driverStatus !== 'available') {
+        console.error('❌ RouteManager: Driver is not available for assignment')
+        return false
+      }
+
+      // Verify the route exists
+      const { data: route, error: routeError } = await supabase
+        .from('routes')
+        .select('id, route_name, status')
+        .eq('id', routeId)
+        .single()
+
+      if (routeError || !route) {
+        console.error('❌ RouteManager: Route not found:', routeError)
+        return false
+      }
+
+      // Update the route with the assigned driver
+      const { error: updateRouteError } = await supabase
+        .from('routes')
+        .update({
+          driver_id: driverId,
+          status: 'planned',
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', routeId)
+
+      if (updateRouteError) {
+        console.error('❌ RouteManager: Error updating route:', updateRouteError)
+        return false
+      }
+
+      // Update all orders in the route to assign the driver
+      const { error: updateOrdersError } = await supabase
+        .from('orders')
+        .update({
+          assigned_driver_id: driverId,
+          status: 'assigned',
+          updated_at: new Date().toISOString()
+        })
+        .eq('route_id', routeId)
+
+      if (updateOrdersError) {
+        console.error('⚠️ RouteManager: Warning - Error updating orders:', updateOrdersError)
+        // Don't fail the entire operation, just log the warning
+      }
+
+      // Optionally update driver availability status
+      try {
+        await supabase
+          .from('user_profiles')
+          .update({
+            availability_status: 'assigned',
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', driverId)
+      } catch (availabilityError) {
+        console.warn('⚠️ RouteManager: Could not update driver availability status:', availabilityError)
+        // Don't fail the operation for this
+      }
+
+      console.log(`✅ RouteManager: Successfully assigned driver ${driver.first_name} ${driver.last_name} to route`)
+      return true
     } catch (error) {
-      console.log("Route tables don't exist yet:", error)
+      console.error("❌ RouteManager: Error assigning driver to route:", error)
       return false
     }
   }
 
-  // Create a new optimized route with advanced algorithms
-  async createOptimizedRoute(driverId: string, orders: any[]): Promise<PersistentRoute> {
+  static async deleteRoute(routeId: string): Promise<boolean> {
     try {
-      console.log(`Creating optimized route for driver ${driverId} with ${orders.length} orders`)
+      console.log(`🗑️ RouteManager: Deleting route ${routeId}`)
 
-      if (orders.length === 0) {
-        throw new Error("No orders provided for route optimization")
+      // First, remove route assignment from orders
+      const { error: ordersError } = await supabase
+        .from("orders")
+        .update({
+          route_id: null,
+          driver_id: null,
+          status: "pending",
+          assigned_at: null
+        })
+        .eq("route_id", routeId)
+
+      if (ordersError) {
+        console.error("❌ RouteManager: Error updating orders:", ordersError)
+        return false
       }
 
-      // Check if tables exist first
-      const tablesExist = await this.checkTablesExist()
-      if (!tablesExist) {
-        console.log("Route tables don't exist, falling back to in-memory route")
-        return this.createInMemoryRoute(driverId, orders)
+      // Delete route stops
+      const { error: stopsError } = await supabase
+        .from("route_stops")
+        .delete()
+        .eq("route_id", routeId)
+
+      if (stopsError) {
+        console.error("⚠️ RouteManager: Warning - Error deleting route stops:", stopsError)
+        // Don't fail the entire operation for this
       }
 
-      // Get driver's current location
-      let startLocation = await this.getDriverLocation()
-
-      // If geolocation fails, use the average of delivery addresses
-      if (!startLocation) {
-        console.log("Geolocation failed, calculating average coordinates")
-        startLocation = await this.calculateAverageCoordinates(orders)
-      }
-
-      // Optimize the route with advanced algorithms
-      const optimizedStops = await this.optimizeRoute(orders, startLocation)
-
-      if (optimizedStops.length === 0) {
-        console.error("Route optimization produced no stops")
-        throw new Error("Route optimization failed: No valid stops could be created")
-      }
-
-      console.log("Optimization successful, creating", optimizedStops.length, "stops")
-
-      const totalDistance = optimizedStops.reduce((sum, stop) => sum + stop.distance, 0)
-      const totalTime = optimizedStops.reduce((sum, stop) => sum + stop.estimatedTime, 0)
-
-      // Calculate optimization metrics
-      const allCoordinates = [startLocation, ...optimizedStops.map((stop) => stop.coordinates!)]
-      const routeIndices = Array.from({ length: allCoordinates.length }, (_, i) => i)
-      const routeAnalysis = routeOptimizer.analyzeRoute(routeIndices, allCoordinates)
-
-      // Create route record in database
-      const routeData = {
-        driver_id: driverId,
-        shift_date: new Date().toISOString().split("T")[0],
-        status: "active",
-        total_distance: totalDistance,
-        total_time: totalTime,
-        completed_distance: 0,
-        completed_time: 0,
-        optimization_metrics: JSON.stringify({
-          algorithm: "advanced_multi_strategy",
-          totalDistance,
-          averageSegmentDistance: routeAnalysis.averageSegmentDistance,
-          longestSegment: routeAnalysis.longestSegment,
-          shortestSegment: routeAnalysis.shortestSegment,
-          clusteringScore: routeAnalysis.clusteringScore,
-          improvement: 0,
-        }),
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }
-
-      const { data: route, error: routeError } = await supabase
-        .from("driver_routes")
-        .insert(routeData)
-        .select()
-        .single()
+      // Finally, delete the route
+      const { error: routeError } = await supabase
+        .from("routes")
+        .delete()
+        .eq("id", routeId)
 
       if (routeError) {
-        console.error("Error creating route:", routeError)
-        throw new Error(`Failed to create route: ${routeError.message}`)
+        console.error("❌ RouteManager: Error deleting route:", routeError)
+        return false
       }
 
-      // Create route stops with coordinates and optimization data
-      const stopsData = optimizedStops.map((stop) => ({
-        route_id: route.id,
-        order_id: stop.order.id,
-        sequence: stop.sequence,
-        estimated_time: stop.estimatedTime,
-        estimated_distance: stop.distance,
-        status: stop.status,
-        coordinates: JSON.stringify(stop.coordinates),
-        optimization_score: stop.optimizationScore,
-        cluster_group: stop.clusterGroup,
-        created_at: new Date().toISOString(),
-      }))
-
-      const { error: stopsError } = await supabase.from("route_stops").insert(stopsData)
-
-      if (stopsError) {
-        console.error("Error creating route stops:", stopsError)
-        throw new Error(`Failed to create route stops: ${stopsError.message}`)
-      }
-
-      // Create initial history entry
-      const historyEntry: RouteHistory = {
-        id: crypto.randomUUID(),
-        timestamp: new Date().toISOString(),
-        action: "created",
-        description: `Advanced optimized route created with ${optimizedStops.length} stops using multi-strategy algorithm`,
-        stopCount: optimizedStops.length,
-        totalDistance,
-        totalTime,
-        metadata: {
-          startLocation,
-          orderCount: orders.length,
-          algorithm: "advanced_multi_strategy",
-          optimizationMetrics: routeAnalysis,
-        },
-      }
-
-      await this.addHistoryEntry(route.id, historyEntry)
-
-      const persistentRoute: PersistentRoute = {
-        id: route.id,
-        driverId,
-        shiftDate: route.shift_date,
-        status: route.status,
-        stops: optimizedStops,
-        history: [historyEntry],
-        totalDistance,
-        totalTime,
-        completedDistance: 0,
-        completedTime: 0,
-        createdAt: route.created_at,
-        updatedAt: route.updated_at,
-        centerLocation: this.DEFAULT_CENTER,
-        optimizationMetrics: {
-          algorithm: "advanced_multi_strategy",
-          totalDistance,
-          averageSegmentDistance: routeAnalysis.averageSegmentDistance,
-          longestSegment: routeAnalysis.longestSegment,
-          shortestSegment: routeAnalysis.shortestSegment,
-          clusteringScore: routeAnalysis.clusteringScore,
-          improvement: 0,
-        },
-      }
-
-      console.log(`Successfully created advanced optimized route with ${optimizedStops.length} stops`)
-      console.log(`Total distance: ${totalDistance.toFixed(2)} km, Total time: ${totalTime.toFixed(1)} minutes`)
-      return persistentRoute
+      console.log(`✅ RouteManager: Successfully deleted route ${routeId}`)
+      return true
     } catch (error) {
-      console.error("Error creating optimized route:", error)
-      // Fallback to in-memory route if database operations fail
-      return this.createInMemoryRoute(driverId, orders)
+      console.error("❌ RouteManager: Error deleting route:", error)
+      return false
     }
   }
 
-  // Create an in-memory route when database tables don't exist
-  private async createInMemoryRoute(driverId: string, orders: any[]): Promise<PersistentRoute> {
-    console.log(`Creating in-memory route for ${orders.length} orders`)
-
-    if (orders.length === 0) {
-      console.log("No orders to optimize")
-      const now = new Date().toISOString()
-      return {
-        id: crypto.randomUUID(),
-        driverId,
-        shiftDate: now.split("T")[0],
-        status: "active",
-        stops: [],
-        history: [],
-        totalDistance: 0,
-        totalTime: 0,
-        completedDistance: 0,
-        completedTime: 0,
-        createdAt: now,
-        updatedAt: now,
-        centerLocation: this.DEFAULT_CENTER,
-      }
-    }
-
-    // Get driver's current location
-    let startLocation = await this.getDriverLocation()
-
-    // If geolocation fails, use the average of delivery addresses
-    if (!startLocation) {
-      console.log("Geolocation failed, calculating average coordinates")
-      startLocation = await this.calculateAverageCoordinates(orders)
-    }
-
-    console.log("Optimizing route with start location:", startLocation)
-
+  /**
+   * Get route by ID
+   */
+  static async getRoute(routeId: string): Promise<Route | null> {
     try {
-      const optimizedStops = await this.optimizeRoute(orders, startLocation)
-      console.log("Optimization complete, created", optimizedStops.length, "stops")
-
-      const totalDistance = optimizedStops.reduce((sum, stop) => sum + stop.distance, 0)
-      const totalTime = optimizedStops.reduce((sum, stop) => sum + stop.estimatedTime, 0)
-      const now = new Date().toISOString()
-
-      return {
-        id: crypto.randomUUID(),
-        driverId,
-        shiftDate: now.split("T")[0],
-        status: "active",
-        stops: optimizedStops,
-        history: [
-          {
-            id: crypto.randomUUID(),
-            timestamp: now,
-            action: "created",
-            description: `In-memory advanced route created with ${optimizedStops.length} stops`,
-            stopCount: optimizedStops.length,
-            totalDistance,
-            totalTime,
-            metadata: { inMemory: true, algorithm: "advanced_multi_strategy" },
-          },
-        ],
-        totalDistance,
-        totalTime,
-        completedDistance: 0,
-        completedTime: 0,
-        createdAt: now,
-        updatedAt: now,
-        centerLocation: this.DEFAULT_CENTER,
-        optimizationMetrics: {
-          algorithm: "advanced_multi_strategy",
-          totalDistance,
-          averageSegmentDistance:
-            optimizedStops.length > 0
-              ? optimizedStops.reduce((sum, stop) => sum + stop.distance, 0) / optimizedStops.length
-              : 0,
-          longestSegment: optimizedStops.length > 0 ? Math.max(...optimizedStops.map((stop) => stop.distance)) : 0,
-          shortestSegment: optimizedStops.length > 0 ? Math.min(...optimizedStops.map((stop) => stop.distance)) : 0,
-          clusteringScore: 0,
-          improvement: 0,
-        },
-      }
-    } catch (error) {
-      console.error("Error in in-memory route creation:", error)
-      throw error
-    }
-  }
-
-  // Get current active route for driver with coordinates
-  async getCurrentRoute(driverId: string): Promise<PersistentRoute | null> {
-    try {
-      const tablesExist = await this.checkTablesExist()
-      if (!tablesExist) {
-        return null
-      }
-
-      const today = new Date().toISOString().split("T")[0]
-
-      const { data: route, error: routeError } = await supabase
-        .from("driver_routes")
+      const { data: route, error } = await supabase
+        .from("routes")
         .select("*")
-        .eq("driver_id", driverId)
-        .eq("shift_date", today)
-        .eq("status", "active")
+        .eq("id", routeId)
         .single()
 
-      if (routeError || !route) return null
-
-      // Get route stops with order details and coordinates
-      const { data: stops, error: stopsError } = await supabase
-        .from("route_stops")
-        .select(`
-          *,
-          orders (*)
-        `)
-        .eq("route_id", route.id)
-        .order("sequence")
-
-      if (stopsError) {
-        console.error("Error fetching route stops:", stopsError)
+      if (error) {
+        if (error.code === "PGRST116") {
+          return null // Route not found
+        }
+        console.error("Error fetching route:", error)
         return null
       }
 
-      // Get route history
-      const { data: history, error: historyError } = await supabase
-        .from("route_history")
-        .select("*")
-        .eq("route_id", route.id)
-        .order("timestamp")
-
-      if (historyError) {
-        console.error("Error fetching route history:", historyError)
-      }
-
-      const routeStops: RouteStop[] = stops
-        .filter((stop) => stop.orders) // Filter out stops without orders
-        .map((stop) => ({
-          order: stop.orders,
-          estimatedTime: stop.estimated_time,
-          distance: stop.estimated_distance,
-          type: "delivery",
-          status: stop.status,
-          completedAt: stop.completed_at,
-          actualTime: stop.actual_time,
-          actualDistance: stop.actual_distance,
-          sequence: stop.sequence,
-          coordinates: stop.coordinates ? JSON.parse(stop.coordinates) : undefined,
-          optimizationScore: stop.optimization_score,
-          clusterGroup: stop.cluster_group,
-        }))
-
-      console.log("Loaded route with", routeStops.length, "valid stops")
-
-      if (routeStops.length === 0) {
-        console.warn("Route exists but has no valid stops")
-        return null
-      }
-
-      // Parse optimization metrics if available
-      let optimizationMetrics
-      try {
-        optimizationMetrics = route.optimization_metrics ? JSON.parse(route.optimization_metrics) : undefined
-      } catch (error) {
-        console.warn("Failed to parse optimization metrics:", error)
-      }
-
-      return {
-        id: route.id,
-        driverId: route.driver_id,
-        shiftDate: route.shift_date,
-        status: route.status,
-        stops: routeStops,
-        history: history || [],
-        totalDistance: route.total_distance,
-        totalTime: route.total_time,
-        completedDistance: route.completed_distance,
-        completedTime: route.completed_time,
-        createdAt: route.created_at,
-        updatedAt: route.updated_at,
-        centerLocation: this.DEFAULT_CENTER,
-        optimizationMetrics,
-      }
+      return route
     } catch (error) {
-      console.error("Error getting current route:", error)
+      console.error("RouteManager.getRoute error:", error)
       return null
     }
   }
 
-  // Complete a delivery and update route
-  async completeDelivery(
-    routeId: string,
-    orderId: string,
-    actualTime?: number,
-    actualDistance?: number,
-  ): Promise<PersistentRoute> {
+  /**
+   * Get route stops for a route
+   */
+  static async getRouteStops(routeId: string): Promise<RouteStop[]> {
     try {
-      const tablesExist = await this.checkTablesExist()
-      if (!tablesExist) {
-        throw new Error("Route tables not available")
-      }
-
-      const completedAt = new Date().toISOString()
-
-      // Update route stop
-      const { error: stopError } = await supabase
+      const { data: stops, error } = await supabase
         .from("route_stops")
-        .update({
-          status: "completed",
-          completed_at: completedAt,
-          actual_time: actualTime,
-          actual_distance: actualDistance,
-          updated_at: completedAt,
-        })
+        .select(`
+          *,
+          orders (
+            id,
+            order_number,
+            customer_name,
+            delivery_address,
+            status
+          )
+        `)
         .eq("route_id", routeId)
-        .eq("order_id", orderId)
-
-      if (stopError) {
-        console.error("Error updating route stop:", stopError)
-        throw new Error(`Failed to update route stop: ${stopError.message}`)
-      }
-
-      // Get updated route data
-      const route = await this.getCurrentRoute("")
-      if (!route) throw new Error("Route not found")
-
-      // Calculate new completed totals
-      const completedStops = route.stops.filter((stop) => stop.status === "completed")
-      const newCompletedDistance = completedStops.reduce((sum, stop) => sum + (stop.actualDistance || stop.distance), 0)
-      const newCompletedTime = completedStops.reduce((sum, stop) => sum + (stop.actualTime || stop.estimatedTime), 0)
-
-      // Update route totals
-      const { error: routeError } = await supabase
-        .from("driver_routes")
-        .update({
-          completed_distance: newCompletedDistance,
-          completed_time: newCompletedTime,
-          updated_at: completedAt,
-        })
-        .eq("id", routeId)
-
-      if (routeError) {
-        console.error("Error updating route:", routeError)
-        throw new Error(`Failed to update route: ${routeError.message}`)
-      }
-
-      // Add history entry
-      const historyEntry: RouteHistory = {
-        id: crypto.randomUUID(),
-        timestamp: completedAt,
-        action: "completed",
-        description: `Delivery completed for order ${orderId}`,
-        stopCount: route.stops.length,
-        totalDistance: route.totalDistance,
-        totalTime: route.totalTime,
-        metadata: { orderId, actualTime, actualDistance },
-      }
-
-      await this.addHistoryEntry(routeId, historyEntry)
-
-      // Return updated route
-      return {
-        ...route,
-        completedDistance: newCompletedDistance,
-        completedTime: newCompletedTime,
-        updatedAt: completedAt,
-      }
-    } catch (error) {
-      console.error("Error completing delivery:", error)
-      throw new Error("Failed to complete delivery")
-    }
-  }
-
-  // Add new delivery to existing route with re-optimization
-  async addDeliveryToRoute(routeId: string, newOrder: any): Promise<PersistentRoute> {
-    try {
-      const tablesExist = await this.checkTablesExist()
-      if (!tablesExist) {
-        throw new Error("Route tables not available")
-      }
-
-      const route = await this.getCurrentRoute("")
-      if (!route) throw new Error("Route not found")
-
-      // Get all pending orders including the new one
-      const pendingOrders = route.stops
-        .filter((stop) => stop.status === "pending")
-        .map((stop) => stop.order)
-        .concat([newOrder])
-
-      // Re-optimize the route with the new order
-      const reoptimizedStops = await this.optimizeRoute(pendingOrders, this.DEFAULT_DEPOT)
-
-      // Update route totals
-      const newTotalDistance = route.completedDistance + reoptimizedStops.reduce((sum, stop) => sum + stop.distance, 0)
-      const newTotalTime = route.completedTime + reoptimizedStops.reduce((sum, stop) => sum + stop.estimatedTime, 0)
-
-      // Delete existing pending stops
-      await supabase.from("route_stops").delete().eq("route_id", routeId).eq("status", "pending")
-
-      // Insert re-optimized stops
-      const stopsData = reoptimizedStops.map((stop) => ({
-        route_id: routeId,
-        order_id: stop.order.id,
-        sequence: stop.sequence,
-        estimated_time: stop.estimatedTime,
-        estimated_distance: stop.distance,
-        status: stop.status,
-        coordinates: JSON.stringify(stop.coordinates),
-        optimization_score: stop.optimizationScore,
-        cluster_group: stop.clusterGroup,
-        created_at: new Date().toISOString(),
-      }))
-
-      const { error: stopsError } = await supabase.from("route_stops").insert(stopsData)
-
-      if (stopsError) {
-        console.error("Error adding route stops:", stopsError)
-        throw new Error(`Failed to add route stops: ${stopsError.message}`)
-      }
-
-      // Update route totals
-      const { error: routeError } = await supabase
-        .from("driver_routes")
-        .update({
-          total_distance: newTotalDistance,
-          total_time: newTotalTime,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", routeId)
-
-      if (routeError) {
-        console.error("Error updating route totals:", routeError)
-        throw new Error(`Failed to update route totals: ${routeError.message}`)
-      }
-
-      // Add history entry
-      const historyEntry: RouteHistory = {
-        id: crypto.randomUUID(),
-        timestamp: new Date().toISOString(),
-        action: "updated",
-        description: `New delivery added and route re-optimized: ${newOrder.order_number}`,
-        stopCount: reoptimizedStops.length,
-        totalDistance: newTotalDistance,
-        totalTime: newTotalTime,
-        metadata: { orderId: newOrder.id, orderNumber: newOrder.order_number, reoptimized: true },
-      }
-
-      await this.addHistoryEntry(routeId, historyEntry)
-
-      // Return updated route
-      const updatedRoute = await this.getCurrentRoute("")
-      return updatedRoute!
-    } catch (error) {
-      console.error("Error adding delivery to route:", error)
-      throw new Error("Failed to add delivery to route")
-    }
-  }
-
-  // Cancel a delivery
-  async cancelDelivery(routeId: string, orderId: string, reason: string): Promise<PersistentRoute> {
-    try {
-      const tablesExist = await this.checkTablesExist()
-      if (!tablesExist) {
-        throw new Error("Route tables not available")
-      }
-
-      const cancelledAt = new Date().toISOString()
-
-      // Update route stop
-      const { error: stopError } = await supabase
-        .from("route_stops")
-        .update({
-          status: "cancelled",
-          completed_at: cancelledAt,
-          updated_at: cancelledAt,
-        })
-        .eq("route_id", routeId)
-        .eq("order_id", orderId)
-
-      if (stopError) {
-        console.error("Error cancelling route stop:", stopError)
-        throw new Error(`Failed to cancel route stop: ${stopError.message}`)
-      }
-
-      // Add history entry
-      const historyEntry: RouteHistory = {
-        id: crypto.randomUUID(),
-        timestamp: cancelledAt,
-        action: "cancelled",
-        description: `Delivery cancelled: ${reason}`,
-        stopCount: 0,
-        totalDistance: 0,
-        totalTime: 0,
-        metadata: { orderId, reason },
-      }
-
-      await this.addHistoryEntry(routeId, historyEntry)
-
-      // Return updated route
-      const updatedRoute = await this.getCurrentRoute("")
-      return updatedRoute!
-    } catch (error) {
-      console.error("Error cancelling delivery:", error)
-      throw new Error("Failed to cancel delivery")
-    }
-  }
-
-  // Recalculate route for pending deliveries with advanced optimization
-  async recalculateRoute(routeId: string, pendingOrders: any[]): Promise<PersistentRoute> {
-    try {
-      const tablesExist = await this.checkTablesExist()
-      if (!tablesExist) {
-        throw new Error("Route tables not available")
-      }
-
-      const startLocation: [number, number] = this.DEFAULT_DEPOT
-      const optimizedStops = await this.optimizeRoute(pendingOrders, startLocation)
-
-      // Update pending stops with new optimization
-      for (const stop of optimizedStops) {
-        const { error } = await supabase
-          .from("route_stops")
-          .update({
-            sequence: stop.sequence,
-            estimated_time: stop.estimatedTime,
-            estimated_distance: stop.distance,
-            coordinates: JSON.stringify(stop.coordinates),
-            optimization_score: stop.optimizationScore,
-            cluster_group: stop.clusterGroup,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("route_id", routeId)
-          .eq("order_id", stop.order.id)
-          .eq("status", "pending")
-
-        if (error) {
-          console.error("Error updating route stop:", error)
-        }
-      }
-
-      // Add history entry
-      const historyEntry: RouteHistory = {
-        id: crypto.randomUUID(),
-        timestamp: new Date().toISOString(),
-        action: "recalculated",
-        description: `Route recalculated with advanced optimization for ${optimizedStops.length} pending deliveries`,
-        stopCount: optimizedStops.length,
-        totalDistance: 0,
-        totalTime: 0,
-        metadata: { pendingCount: optimizedStops.length, algorithm: "advanced_multi_strategy" },
-      }
-
-      await this.addHistoryEntry(routeId, historyEntry)
-
-      // Return updated route
-      const updatedRoute = await this.getCurrentRoute("")
-      return updatedRoute!
-    } catch (error) {
-      console.error("Error recalculating route:", error)
-      throw new Error("Failed to recalculate route")
-    }
-  }
-
-  // End shift and archive route
-  async endShift(routeId: string): Promise<void> {
-    try {
-      const tablesExist = await this.checkTablesExist()
-      if (!tablesExist) {
-        console.log("Route tables not available, skipping database operations for shift end")
-        return // Gracefully handle missing tables
-      }
-
-      const endedAt = new Date().toISOString()
-
-      // Update route status
-      const { error: routeError } = await supabase
-        .from("driver_routes")
-        .update({
-          status: "completed",
-          updated_at: endedAt,
-        })
-        .eq("id", routeId)
-
-      if (routeError) {
-        console.error("Error ending shift:", routeError)
-        throw new Error(`Failed to end shift: ${routeError.message}`)
-      }
-
-      // Add final history entry
-      const historyEntry: RouteHistory = {
-        id: crypto.randomUUID(),
-        timestamp: endedAt,
-        action: "completed",
-        description: "Shift ended and optimized route archived",
-        stopCount: 0,
-        totalDistance: 0,
-        totalTime: 0,
-        metadata: { shiftEnded: true },
-      }
-
-      await this.addHistoryEntry(routeId, historyEntry)
-    } catch (error) {
-      console.error("Error ending shift:", error)
-      // Don't throw error for missing tables - just log it
-      if (error.message?.includes("Route tables not available")) {
-        console.log("Shift end completed (in-memory mode)")
-        return
-      }
-      throw new Error("Failed to end shift")
-    }
-  }
-
-  // Safely end route (works for both database and in-memory routes)
-  async safeEndRoute(routeId: string | null): Promise<void> {
-    try {
-      if (!routeId) {
-        console.log("No route ID provided, clearing in-memory state only")
-        return
-      }
-
-      const tablesExist = await this.checkTablesExist()
-      if (tablesExist) {
-        await this.endShift(routeId)
-      } else {
-        console.log("Route tables not available, ending in-memory route")
-      }
-    } catch (error) {
-      console.error("Error safely ending route:", error)
-      // Don't throw - just log the error
-    }
-  }
-
-  // Add history entry
-  private async addHistoryEntry(routeId: string, entry: RouteHistory): Promise<void> {
-    try {
-      const tablesExist = await this.checkTablesExist()
-      if (!tablesExist) {
-        console.log("Route history table not available, skipping history entry")
-        return
-      }
-
-      const { error } = await supabase.from("route_history").insert({
-        id: entry.id,
-        route_id: routeId,
-        timestamp: entry.timestamp,
-        action: entry.action,
-        description: entry.description,
-        stop_count: entry.stopCount,
-        total_distance: entry.totalDistance,
-        total_time: entry.totalTime,
-        metadata: entry.metadata,
-      })
+        .order("sequence_order")
 
       if (error) {
-        console.error("Error adding history entry:", error)
+        console.error("Error fetching route stops:", error)
+        return []
       }
+
+      return (
+        stops?.map((stop) => ({
+          id: stop.id,
+          route_id: stop.route_id,
+          order_id: stop.order_id,
+          stop_number: stop.stop_number,
+          coordinates: [stop.latitude || 0, stop.longitude || 0] as [number, number],
+          estimated_time: stop.estimated_time || 15,
+          distance_from_previous: stop.distance_from_previous || 0,
+          status: stop.status,
+          actual_arrival_time: stop.actual_arrival_time,
+          notes: stop.notes,
+        })) || []
+      )
     } catch (error) {
-      console.error("Error adding history entry:", error)
+      console.error("RouteManager.getRouteStops error:", error)
+      return []
+    }
+  }
+
+  /**
+   * Get all routes with optional filtering
+   */
+  static async getAllRoutes(adminId?: string): Promise<Route[]> {
+    try {
+      let query = supabase
+        .from("routes")
+        .select(`
+          *,
+          route_stops (
+            id,
+            stop_number,
+            stop_label,
+            status
+          )
+        `)
+        .order("created_at", { ascending: false })
+
+      if (adminId) {
+        query = query.eq("created_by", adminId)
+      }
+
+      const { data: routes, error } = await query
+
+      if (error) {
+        console.error("Error fetching routes:", error)
+        return []
+      }
+
+      return routes || []
+    } catch (error) {
+      console.error("RouteManager.getAllRoutes error:", error)
+      return []
+    }
+  }
+
+  /**
+   * Update route status
+   */
+  static async updateRouteStatus(routeId: string, status: string): Promise<boolean> {
+    try {
+      const updateData: any = {
+        status,
+        updated_at: new Date().toISOString()
+      }
+
+      if (status === "in_progress") {
+        updateData.started_at = new Date().toISOString()
+      } else if (status === "completed") {
+        updateData.completed_at = new Date().toISOString()
+      }
+
+      const { error } = await supabase
+        .from("routes")
+        .update(updateData)
+        .eq("id", routeId)
+
+      if (error) {
+        console.error("Error updating route status:", error)
+        return false
+      }
+
+      return true
+    } catch (error) {
+      console.error("RouteManager.updateRouteStatus error:", error)
+      return false
     }
   }
 }
-
-export const routeManager = new RouteManager()

@@ -33,24 +33,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true)
   const [initialized, setInitialized] = useState(false)
 
-  // Check if environment variables are available
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 
   if (!supabaseUrl || !supabaseAnonKey) {
-    console.error("Missing Supabase environment variables:", {
-      url: !!supabaseUrl,
-      key: !!supabaseAnonKey,
-    })
+    console.error("Missing Supabase environment variables")
   }
 
   const supabase = createClient(supabaseUrl!, supabaseAnonKey!)
 
-  // Use API endpoint to fetch profile to bypass RLS issues
   const fetchUserProfile = async (userId: string) => {
     try {
-      console.log("🔍 Fetching user profile via API for:", userId)
-
       const response = await fetch("/api/get-profile", {
         method: "POST",
         headers: {
@@ -69,12 +62,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         throw new Error(result.error)
       }
 
-      console.log("✅ User profile fetched via API:", result.profile)
       return result.profile
     } catch (error) {
-      console.error("❌ Error fetching user profile via API:", error)
-
-      // Return a fallback profile
+      console.error("Error fetching user profile via API:", error)
       return {
         id: userId,
         user_id: userId,
@@ -90,11 +80,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signIn = async (email: string, password: string) => {
     try {
-      console.log("🔐 Attempting sign in for:", email)
-
       if (!supabaseUrl || !supabaseAnonKey) {
         const error = new Error("Supabase configuration is missing. Please check environment variables.")
-        console.error("❌ Configuration error:", error)
         return { error }
       }
 
@@ -104,29 +91,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       })
 
       if (error) {
-        console.error("❌ Supabase sign in error:", error)
         return { error }
       }
 
-      console.log("✅ Sign in successful:", data.user?.email)
-
       if (data.user) {
         setUser(data.user)
-
-        // Fetch user profile via API to avoid RLS issues
         const userProfile = await fetchUserProfile(data.user.id)
         setProfile(userProfile)
       }
 
       return { data, error: null }
     } catch (err) {
-      console.error("❌ Unexpected error in signIn:", err)
-
       let errorMessage = "An unexpected error occurred during sign in"
       if (err instanceof Error) {
         errorMessage = err.message
       }
-
       return {
         error: {
           message: errorMessage,
@@ -141,10 +120,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const initializeAuth = async () => {
       try {
-        console.log("🚀 Initializing auth...")
-
         if (!supabaseUrl || !supabaseAnonKey) {
-          console.error("❌ Cannot initialize auth: Missing environment variables")
           if (mounted) {
             setLoading(false)
             setInitialized(true)
@@ -152,14 +128,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           return
         }
 
-        // Get initial session
         const {
           data: { session },
           error,
         } = await supabase.auth.getSession()
 
         if (error) {
-          console.error("❌ Error getting session:", error)
           if (mounted) {
             setLoading(false)
             setInitialized(true)
@@ -168,15 +142,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
 
         if (session?.user && mounted) {
-          console.log("✅ Found existing session for:", session.user.email)
           setUser(session.user)
-
           const userProfile = await fetchUserProfile(session.user.id)
           if (mounted) {
             setProfile(userProfile)
           }
-        } else {
-          console.log("ℹ️ No existing session found")
         }
 
         if (mounted) {
@@ -184,7 +154,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setInitialized(true)
         }
       } catch (error) {
-        console.error("❌ Error initializing auth:", error)
         if (mounted) {
           setLoading(false)
           setInitialized(true)
@@ -194,24 +163,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     initializeAuth()
 
-    // Set up auth state listener
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (!mounted || !initialized) return
 
-      console.log("🔄 Auth state changed:", event)
-
       if (event === "SIGNED_IN" && session?.user) {
-        console.log("✅ User signed in:", session.user.email)
         setUser(session.user)
-
         const userProfile = await fetchUserProfile(session.user.id)
         if (mounted) {
           setProfile(userProfile)
         }
       } else if (event === "SIGNED_OUT") {
-        console.log("👋 User signed out")
         if (mounted) {
           setUser(null)
           setProfile(null)
@@ -227,17 +190,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = async () => {
     try {
-      console.log("👋 Signing out...")
       const { error } = await supabase.auth.signOut()
       if (error) {
-        console.error("❌ Error signing out:", error)
         throw error
       }
       setUser(null)
       setProfile(null)
-      console.log("✅ Sign out successful")
     } catch (error) {
-      console.error("❌ Error in signOut:", error)
       throw error
     }
   }

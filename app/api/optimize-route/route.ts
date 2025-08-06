@@ -1,265 +1,303 @@
 import { type NextRequest, NextResponse } from "next/server"
 
-interface OptimizationWaypoint {
-  coordinates: [number, number] // [lat, lng]
-  name?: string
-  address?: string
+interface OptimizationRequest {
+  orders: Array<{
+    id: string
+    order_number: string
+    customer_name: string
+    delivery_address: string
+    coordinates?: [number, number]
+    priority: "urgent" | "high" | "normal" | "low"
+    status: string
+  }>
+  warehouseLocation: [number, number]
+  settings: {
+    maxOrdersPerRoute: number
+    optimizationMethod: "distance" | "time" | "hybrid"
+    considerPriority: boolean
+    considerTimeWindows: boolean
+    vehicleCapacity: number
+    workingHours: {
+      start: string
+      end: string
+    }
+  }
 }
 
-interface RouteOptimizationRequest {
-  waypoints: OptimizationWaypoint[]
-  options?: {
-    profile?: "driving" | "walking" | "cycling"
-    source?: "first" | "any"
-    destination?: "last" | "any"
-    roundtrip?: boolean
-    annotations?: string[]
-  }
+interface OptimizedRoute {
+  id: string
+  name: string
+  orders: Array<{
+    id: string
+    order_number: string
+    customer_name: string
+    delivery_address: string
+    coordinates: [number, number]
+    priority: string
+    estimatedArrival: string
+    distanceFromPrevious: number
+    timeFromPrevious: number
+  }>
+  totalDistance: number
+  totalTime: number
+  estimatedDuration: string
+  waypoints: Array<[number, number]>
 }
 
 export async function POST(request: NextRequest) {
   try {
-    console.log("🚀 Route optimization API called")
+    console.log("🚚 Starting route optimization...")
 
-    const body: RouteOptimizationRequest = await request.json()
-    const { waypoints, options = {} } = body
+    const body: OptimizationRequest = await request.json()
+    const { orders, warehouseLocation, settings } = body
 
-    console.log(`📍 Received ${waypoints?.length || 0} waypoints`)
-    console.log("📋 Request body:", JSON.stringify(body, null, 2))
-
-    // Validate input
-    if (!waypoints || waypoints.length < 2) {
-      console.error("❌ Invalid waypoints:", waypoints)
-      return NextResponse.json(
-        {
-          success: false,
-          error: "At least 2 waypoints are required",
-        },
-        { status: 400 },
-      )
+    if (!orders || orders.length === 0) {
+      return NextResponse.json({ error: "No orders provided for optimization" }, { status: 400 })
     }
 
-    if (waypoints.length > 12) {
-      console.error("❌ Too many waypoints:", waypoints.length)
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Maximum 12 waypoints allowed",
-        },
-        { status: 400 },
-      )
+    if (!warehouseLocation || warehouseLocation.length !== 2) {
+      return NextResponse.json({ error: "Invalid warehouse location" }, { status: 400 })
     }
 
-    // Get Mapbox access token
-    const accessToken = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN
-    if (!accessToken) {
-      console.error("❌ No Mapbox access token found")
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Mapbox access token not configured",
-        },
-        { status: 500 },
-      )
-    }
+    console.log(`📦 Optimizing ${orders.length} orders from warehouse at [${warehouseLocation.join(", ")}]`)
 
-    console.log("✅ Mapbox access token found")
-
-    // Validate coordinates
-    const validWaypoints = waypoints.filter((wp) => {
-      if (!wp || !wp.coordinates || wp.coordinates.length !== 2) {
-        console.warn("⚠️ Invalid waypoint structure:", wp)
-        return false
-      }
-
-      const [lat, lng] = wp.coordinates
-      const isValid = !isNaN(lat) && !isNaN(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180
-
-      if (!isValid) {
-        console.warn("⚠️ Invalid coordinates:", [lat, lng])
-      }
-
-      return isValid
-    })
-
-    console.log(`✅ Valid waypoints: ${validWaypoints.length}/${waypoints.length}`)
-
-    if (validWaypoints.length < 2) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Not enough valid waypoints after validation",
-        },
-        { status: 400 },
-      )
-    }
-
-    // Format coordinates for Mapbox API (lng,lat format)
-    const coordinates = validWaypoints.map((wp) => `${wp.coordinates[1]},${wp.coordinates[0]}`).join(";")
-    console.log("📍 Formatted coordinates:", coordinates)
-
-    // Build Mapbox Optimization API URL
-    const profile = options.profile || "driving"
-    const source = options.source || "first"
-    const destination = options.destination || "last"
-    const roundtrip = options.roundtrip || false
-
-    const url = new URL(`https://api.mapbox.com/optimized-trips/v1/mapbox/${profile}/${coordinates}`)
-
-    url.searchParams.set("access_token", accessToken)
-    url.searchParams.set("overview", "full")
-    url.searchParams.set("steps", "true")
-    url.searchParams.set("geometries", "geojson")
-    url.searchParams.set("source", source)
-    url.searchParams.set("destination", destination)
-    url.searchParams.set("roundtrip", roundtrip.toString())
-
-    if (options.annotations) {
-      url.searchParams.set("annotations", options.annotations.join(","))
-    }
-
-    console.log(`📡 Calling Mapbox API: ${url.toString()}`)
-
-    // Call Mapbox API with timeout
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 30000) // 30 second timeout
-
-    let response: Response
-    try {
-      response = await fetch(url.toString(), {
-        signal: controller.signal,
-        headers: {
-          "User-Agent": "DeliveryOS/1.0",
-        },
-      })
-    } catch (fetchError) {
-      clearTimeout(timeoutId)
-      if (fetchError instanceof Error && fetchError.name === "AbortError") {
-        console.error("❌ Mapbox API timeout")
-        return NextResponse.json(
-          {
-            success: false,
-            error: "Request timeout - Mapbox API took too long to respond",
-          },
-          { status: 408 },
-        )
-      }
-      throw fetchError
-    }
-
-    clearTimeout(timeoutId)
-
-    console.log(`📥 Mapbox API response status: ${response.status}`)
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      console.error("❌ Mapbox API error:", response.status, errorText)
-
-      let errorMessage = `Mapbox API error: ${response.status}`
-      if (response.status === 401) {
-        errorMessage = "Invalid Mapbox access token"
-      } else if (response.status === 422) {
-        errorMessage = "Invalid coordinates or route parameters"
-      } else if (response.status === 429) {
-        errorMessage = "Rate limit exceeded - please try again later"
-      }
-
-      return NextResponse.json(
-        {
-          success: false,
-          error: errorMessage,
-          details: errorText,
-        },
-        { status: response.status },
-      )
-    }
-
-    const data = await response.json()
-    console.log("📊 Mapbox API response:", JSON.stringify(data, null, 2))
-
-    if (data.code !== "Ok") {
-      console.error("❌ Optimization failed:", data.code, data.message)
-      return NextResponse.json(
-        {
-          success: false,
-          error: `Optimization failed: ${data.code}`,
-          details: data.message || "Unknown optimization error",
-        },
-        { status: 400 },
-      )
-    }
-
-    if (!data.trips || data.trips.length === 0) {
-      console.error("❌ No trips returned")
-      return NextResponse.json(
-        {
-          success: false,
-          error: "No optimized trips returned from Mapbox",
-        },
-        { status: 400 },
-      )
-    }
-
-    const trip = data.trips[0]
-    console.log(`✅ Trip found - Distance: ${trip.distance}m, Duration: ${trip.duration}s`)
-
-    // Process the optimized route
-    const optimizedWaypoints = data.waypoints.map((wp: any, index: number) => {
-      const originalWaypoint = validWaypoints[wp.waypoint_index] || validWaypoints[0]
-      return {
-        coordinates: [wp.location[1], wp.location[0]] as [number, number], // Convert back to [lat, lng]
-        name: originalWaypoint.name || `Stop ${index + 1}`,
-        address: originalWaypoint.address,
-        waypointIndex: wp.waypoint_index,
-      }
-    })
-
-    // Convert geometry coordinates from [lng, lat] to [lat, lng]
-    const geometry =
-      trip.geometry?.coordinates?.map((coord: [number, number]) => [coord[1], coord[0]] as [number, number]) || []
-
-    const result = {
-      waypoints: optimizedWaypoints,
-      distance: trip.distance || 0, // meters
-      duration: trip.duration || 0, // seconds
-      geometry,
-      legs:
-        trip.legs?.map((leg: any) => ({
-          distance: leg.distance || 0,
-          duration: leg.duration || 0,
-          steps:
-            leg.steps?.map((step: any) => ({
-              distance: step.distance || 0,
-              duration: step.duration || 0,
-              instruction: step.maneuver?.instruction || "",
-              coordinates:
-                step.geometry?.coordinates?.map(
-                  (coord: [number, number]) => [coord[1], coord[0]] as [number, number],
-                ) || [],
-            })) || [],
-        })) || [],
-    }
-
-    console.log(
-      `✅ Route optimization successful: ${(result.distance / 1000).toFixed(1)}km, ${Math.round(result.duration / 60)}min`,
+    // Filter orders that have coordinates
+    const ordersWithCoordinates = orders.filter(
+      (order) =>
+        order.coordinates &&
+        Array.isArray(order.coordinates) &&
+        order.coordinates.length === 2 &&
+        !isNaN(order.coordinates[0]) &&
+        !isNaN(order.coordinates[1]),
     )
+
+    if (ordersWithCoordinates.length === 0) {
+      return NextResponse.json(
+        {
+          error: "No orders with valid coordinates found",
+          suggestion: "Please geocode your orders first",
+        },
+        { status: 400 },
+      )
+    }
+
+    console.log(`📍 Found ${ordersWithCoordinates.length} orders with valid coordinates`)
+
+    // Sort orders by priority if enabled
+    const sortedOrders = [...ordersWithCoordinates]
+    if (settings.considerPriority) {
+      const priorityWeight = { urgent: 4, high: 3, normal: 2, low: 1 }
+      sortedOrders.sort((a, b) => {
+        const weightA = priorityWeight[a.priority] || 2
+        const weightB = priorityWeight[b.priority] || 2
+        return weightB - weightA
+      })
+    }
+
+    // Create optimized routes using MyRouteOnline-inspired algorithm
+    const optimizedRoutes = await createOptimizedRoutes(sortedOrders, warehouseLocation, settings)
+
+    console.log(`✅ Generated ${optimizedRoutes.length} optimized routes`)
 
     return NextResponse.json({
       success: true,
-      data: result,
+      routes: optimizedRoutes,
+      summary: {
+        totalOrders: orders.length,
+        optimizedOrders: ordersWithCoordinates.length,
+        totalRoutes: optimizedRoutes.length,
+        totalDistance: optimizedRoutes.reduce((sum, route) => sum + route.totalDistance, 0),
+        totalTime: optimizedRoutes.reduce((sum, route) => sum + route.totalTime, 0),
+        averageOrdersPerRoute: Math.round(ordersWithCoordinates.length / optimizedRoutes.length),
+      },
+      settings: settings,
     })
   } catch (error) {
     console.error("❌ Route optimization error:", error)
-
-    const errorMessage = error instanceof Error ? error.message : "Unknown server error"
-
     return NextResponse.json(
       {
-        success: false,
-        error: "Internal server error",
-        details: errorMessage,
+        error: "Failed to optimize routes",
+        details: error instanceof Error ? error.message : "Unknown error",
       },
       { status: 500 },
     )
   }
+}
+
+async function createOptimizedRoutes(
+  orders: any[],
+  warehouseLocation: [number, number],
+  settings: any,
+): Promise<OptimizedRoute[]> {
+  const routes: OptimizedRoute[] = []
+  const unassignedOrders = [...orders]
+  let routeCounter = 1
+
+  while (unassignedOrders.length > 0) {
+    const route: OptimizedRoute = {
+      id: `route-${routeCounter}`,
+      name: `Route ${routeCounter}`,
+      orders: [],
+      totalDistance: 0,
+      totalTime: 0,
+      estimatedDuration: "",
+      waypoints: [warehouseLocation],
+    }
+
+    let currentLocation = warehouseLocation
+    let currentTime = parseTimeToMinutes(settings.workingHours.start)
+
+    // Add orders to route using nearest neighbor algorithm with MyRouteOnline principles
+    while (
+      route.orders.length < settings.maxOrdersPerRoute &&
+      unassignedOrders.length > 0 &&
+      currentTime < parseTimeToMinutes(settings.workingHours.end)
+    ) {
+      let bestOrderIndex = -1
+      let bestScore = Number.POSITIVE_INFINITY
+
+      // Find the best next order based on optimization method
+      for (let i = 0; i < unassignedOrders.length; i++) {
+        const order = unassignedOrders[i]
+        const distance = calculateDistance(currentLocation, order.coordinates)
+        const travelTime = estimateTravelTime(distance)
+
+        let score = 0
+
+        switch (settings.optimizationMethod) {
+          case "distance":
+            score = distance
+            break
+          case "time":
+            score = travelTime
+            break
+          case "hybrid":
+            score = distance * 0.6 + travelTime * 0.4
+            break
+        }
+
+        // Apply priority weighting
+        if (settings.considerPriority) {
+          const priorityMultiplier =
+            {
+              urgent: 0.5,
+              high: 0.7,
+              normal: 1.0,
+              low: 1.3,
+            }[order.priority] || 1.0
+          score *= priorityMultiplier
+        }
+
+        if (score < bestScore) {
+          bestScore = score
+          bestOrderIndex = i
+        }
+      }
+
+      if (bestOrderIndex === -1) break
+
+      // Add the best order to the route
+      const selectedOrder = unassignedOrders[bestOrderIndex]
+      const distance = calculateDistance(currentLocation, selectedOrder.coordinates)
+      const travelTime = estimateTravelTime(distance)
+
+      // Estimate service time (5-15 minutes based on priority)
+      const serviceTime =
+        {
+          urgent: 15,
+          high: 12,
+          normal: 10,
+          low: 8,
+        }[selectedOrder.priority] || 10
+
+      currentTime += travelTime + serviceTime
+
+      route.orders.push({
+        id: selectedOrder.id,
+        order_number: selectedOrder.order_number,
+        customer_name: selectedOrder.customer_name,
+        delivery_address: selectedOrder.delivery_address,
+        coordinates: selectedOrder.coordinates,
+        priority: selectedOrder.priority,
+        estimatedArrival: formatMinutesToTime(currentTime - serviceTime),
+        distanceFromPrevious: Math.round(distance * 100) / 100,
+        timeFromPrevious: travelTime,
+      })
+
+      route.waypoints.push(selectedOrder.coordinates)
+      route.totalDistance += distance
+      route.totalTime += travelTime + serviceTime
+
+      currentLocation = selectedOrder.coordinates
+      unassignedOrders.splice(bestOrderIndex, 1)
+    }
+
+    // Add return to warehouse
+    const returnDistance = calculateDistance(currentLocation, warehouseLocation)
+    const returnTime = estimateTravelTime(returnDistance)
+    route.totalDistance += returnDistance
+    route.totalTime += returnTime
+    route.waypoints.push(warehouseLocation)
+
+    route.estimatedDuration = formatMinutesToDuration(route.totalTime)
+
+    routes.push(route)
+    routeCounter++
+
+    // Safety check to prevent infinite loops
+    if (routeCounter > 50) {
+      console.warn("⚠️ Route optimization stopped at 50 routes to prevent infinite loop")
+      break
+    }
+  }
+
+  return routes
+}
+
+function calculateDistance(point1: [number, number], point2: [number, number]): number {
+  const [lat1, lon1] = point1
+  const [lat2, lon2] = point2
+
+  const R = 6371 // Earth's radius in kilometers
+  const dLat = toRadians(lat2 - lat1)
+  const dLon = toRadians(lon2 - lon1)
+
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2)
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+  return R * c
+}
+
+function toRadians(degrees: number): number {
+  return degrees * (Math.PI / 180)
+}
+
+function estimateTravelTime(distanceKm: number): number {
+  // Estimate travel time in minutes
+  // Assume average speed of 30 km/h in urban areas
+  const averageSpeedKmh = 30
+  return Math.round((distanceKm / averageSpeedKmh) * 60)
+}
+
+function parseTimeToMinutes(timeString: string): number {
+  const [hours, minutes] = timeString.split(":").map(Number)
+  return hours * 60 + minutes
+}
+
+function formatMinutesToTime(minutes: number): string {
+  const hours = Math.floor(minutes / 60)
+  const mins = minutes % 60
+  return `${hours.toString().padStart(2, "0")}:${mins.toString().padStart(2, "0")}`
+}
+
+function formatMinutesToDuration(minutes: number): string {
+  const hours = Math.floor(minutes / 60)
+  const mins = minutes % 60
+
+  if (hours > 0) {
+    return `${hours}h ${mins}m`
+  }
+  return `${mins}m`
 }

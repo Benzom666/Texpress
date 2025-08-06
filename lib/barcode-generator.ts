@@ -705,3 +705,75 @@ export function testBarcodeGeneration(): void {
     }
   })
 }
+
+export async function generateDeliveryLabel(
+  order: any,
+  routeInfo: { routeNumber: string; stopNumber: string; sequence: number },
+): Promise<{ dataURL: string; config: BarcodeConfig }> {
+  // Create barcode text with route info
+  const barcodeText = `${order.order_number}-${routeInfo.routeNumber}-${routeInfo.stopNumber}`
+
+  const config: BarcodeConfig = {
+    ...BARCODE_PRESETS.SHIPPING_LABEL,
+    displayValue: true,
+    fontSize: 10,
+  }
+
+  // Generate barcode
+  const dataURL = await generateBarcodeAsPNG(barcodeText, config)
+
+  return { dataURL, config }
+}
+
+// Generate complete shipping label with route info
+export function generateShippingLabelHTML(
+  order: any,
+  routeInfo: { routeNumber: string; stopNumber: string; sequence: number; totalStops: number },
+  barcodeDataURL: string,
+): string {
+  return `
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  @page { size: 100mm 150mm; margin: 0; }
+  body { font-family: Arial, sans-serif; margin: 0; padding: 0; width: 100mm; height: 150mm; }
+  .label { width: 100mm; height: 150mm; border: 1px solid #000; padding: 5mm; box-sizing: border-box; display: flex; flex-direction: column; }
+  .header { text-align: center; border-bottom: 2px solid #000; padding-bottom: 5mm; margin-bottom: 2mm; }
+  .route-info { background: #f0f0f0; padding: 3mm; margin: 2mm 0; border: 1px solid #ccc; border-radius: 4px; }
+  .barcode { text-align: center; margin: 5mm 0; flex-grow: 1; display: flex; flex-direction: column; justify-content: center; }
+  .address { margin: 3mm 0; }
+  strong { font-weight: bold; }
+</style>
+</head>
+<body>
+<div class="label">
+  <div class="header">
+    <h2>DELIVERY LABEL</h2>
+  </div>
+
+  <div class="route-info">
+    <strong>Route:</strong> ${routeInfo.routeNumber}<br>
+    <strong>Stop:</strong> ${routeInfo.stopNumber} (${routeInfo.sequence} of ${routeInfo.totalStops})<br>
+    <strong>Order:</strong> ${order.order_number}
+  </div>
+
+  <div class="address">
+    <strong>Deliver to:</strong><br>
+    ${order.customer_name}<br>
+    ${order.delivery_address}<br>
+    ${order.delivery_city || ""}, ${order.delivery_postal_code || ""}
+  </div>
+
+  <div class="barcode">
+    <img src="${barcodeDataURL}" alt="Barcode" style="max-width: 80mm; max-height: 40mm; object-fit: contain;">
+    <div style="font-size: 8pt; text-align: center; margin-top: 2mm;">
+      ${order.order_number}-${routeInfo.routeNumber}-${routeInfo.stopNumber}
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
+`
+}
