@@ -1,335 +1,146 @@
 import { useState, useCallback } from 'react'
-import { supabaseClient } from '@/lib/supabase-client'
+import { supabase } from '@/lib/supabase'
 
-export interface Driver {
-  id: string
-  first_name: string
-  last_name: string
-  email: string
-  phone?: string
-  availability_status: 'available' | 'busy' | 'offline'
-  created_at: string
-  updated_at: string
-}
-
-export interface Route {
-  id: string
-  route_number: string
-  route_name: string
-  driver_id?: string
-  status: 'planned' | 'in_progress' | 'completed' | 'cancelled'
-  total_stops: number
-  total_distance?: number
-  estimated_duration?: number
-  created_by: string
-  created_at: string
-  updated_at: string
-}
-
-export interface Order {
-  id: string
-  order_number: string
-  customer_name: string
-  customer_phone?: string
-  delivery_address: string
-  status: string
-  priority: string
-  created_at: string
-  updated_at: string
-}
-
-export interface ApiResponse<T> {
-  data: T | null
-  error: string | null
+export interface ApiResponse<T = any> {
+  data?: T
+  error?: string
   loading: boolean
 }
 
-export interface MutationResponse {
-  success: boolean
-  error: string | null
-  loading: boolean
-}
-
-// Custom hook for driver operations
-export function useDriverMutations() {
+export function useApi() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const createDriver = useCallback(async (driverData: Partial<Driver>) => {
+  const request = useCallback(async <T>(
+    operation: () => Promise<{ data: T | null; error: any }>
+  ): Promise<T | null> => {
     setLoading(true)
     setError(null)
-    
+
     try {
-      const { data, error: supabaseError } = await supabaseClient
-        .from('user_profiles')
-        .insert([{
-          ...driverData,
-          role: 'driver',
-          availability_status: 'available'
-        }])
-        .select()
-        .single()
+      const { data, error: apiError } = await operation()
+      
+      if (apiError) {
+        setError(apiError.message || 'An error occurred')
+        return null
+      }
 
-      if (supabaseError) throw supabaseError
-
-      setLoading(false)
-      return { success: true, data, error: null }
+      return data
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Unknown error'
+      const errorMessage = err instanceof Error ? err.message : 'An unexpected error occurred'
       setError(errorMessage)
+      return null
+    } finally {
       setLoading(false)
-      return { success: false, data: null, error: errorMessage }
     }
   }, [])
 
-  const updateDriver = useCallback(async (driverId: string, updates: Partial<Driver>) => {
-    setLoading(true)
-    setError(null)
-    
-    try {
-      const { data, error: supabaseError } = await supabaseClient
-        .from('user_profiles')
-        .update(updates)
-        .eq('id', driverId)
-        .select()
-        .single()
+  return { request, loading, error }
+}
 
-      if (supabaseError) throw supabaseError
+export function useDriverMutations() {
+  const { request, loading, error } = useApi()
 
-      setLoading(false)
-      return { success: true, data, error: null }
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Unknown error'
-      setError(errorMessage)
-      setLoading(false)
-      return { success: false, data: null, error: errorMessage }
-    }
-  }, [])
-
-  const deleteDriver = useCallback(async (driverId: string) => {
-    setLoading(true)
-    setError(null)
-    
-    try {
-      const { error: supabaseError } = await supabaseClient
-        .from('user_profiles')
-        .delete()
-        .eq('id', driverId)
-
-      if (supabaseError) throw supabaseError
-
-      setLoading(false)
-      return { success: true, error: null }
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Unknown error'
-      setError(errorMessage)
-      setLoading(false)
-      return { success: false, error: errorMessage }
-    }
-  }, [])
-
-  const updateAvailability = useCallback(async (driverId: string, status: Driver['availability_status']) => {
-    setLoading(true)
-    setError(null)
-    
-    try {
-      const { data, error: supabaseError } = await supabaseClient
+  const updateDriverStatus = useCallback(async (
+    driverId: string, 
+    status: 'available' | 'busy' | 'offline'
+  ) => {
+    return request(async () => {
+      return await supabase
         .from('user_profiles')
         .update({ availability_status: status })
         .eq('id', driverId)
         .select()
         .single()
+    })
+  }, [request])
 
-      if (supabaseError) throw supabaseError
+  const updateDriverLocation = useCallback(async (
+    driverId: string, 
+    location: { latitude: number; longitude: number }
+  ) => {
+    return request(async () => {
+      return await supabase
+        .from('user_profiles')
+        .update({ 
+          current_location: {
+            type: 'Point',
+            coordinates: [location.longitude, location.latitude]
+          }
+        })
+        .eq('id', driverId)
+        .select()
+        .single()
+    })
+  }, [request])
 
-      setLoading(false)
-      return { success: true, data, error: null }
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Unknown error'
-      setError(errorMessage)
-      setLoading(false)
-      return { success: false, data: null, error: errorMessage }
-    }
-  }, [])
+  const assignOrder = useCallback(async (orderId: string, driverId: string) => {
+    return request(async () => {
+      return await supabase
+        .from('orders')
+        .update({ 
+          assigned_driver_id: driverId,
+          status: 'assigned',
+          assigned_at: new Date().toISOString()
+        })
+        .eq('id', orderId)
+        .select()
+        .single()
+    })
+  }, [request])
 
   return {
-    createDriver,
-    updateDriver,
-    deleteDriver,
-    updateAvailability,
+    updateDriverStatus,
+    updateDriverLocation,
+    assignOrder,
     loading,
     error
   }
 }
 
-// Custom hook for route operations
 export function useRouteMutations() {
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const { request, loading, error } = useApi()
 
-  const createRoute = useCallback(async (routeData: {
-    route_name: string
-    driver_id?: string
-    order_ids: string[]
-    created_by: string
-  }) => {
-    setLoading(true)
-    setError(null)
-    
-    try {
-      // Generate route number
-      const today = new Date().toISOString().split('T')[0].replace(/-/g, '')
-      const { count } = await supabaseClient
+  const createRoute = useCallback(async (routeData: any) => {
+    return request(async () => {
+      return await supabase
         .from('routes')
-        .select('*', { count: 'exact', head: true })
-        .gte('created_at', new Date().toISOString().split('T')[0])
-
-      const routeNumber = `RT${today}${String((count || 0) + 1).padStart(3, '0')}`
-
-      // Create the route
-      const { data: route, error: routeError } = await supabaseClient
-        .from('routes')
-        .insert([{
-          route_number: routeNumber,
-          route_name: routeData.route_name,
-          driver_id: routeData.driver_id,
-          status: 'planned',
-          total_stops: routeData.order_ids.length,
-          created_by: routeData.created_by
-        }])
+        .insert([routeData])
         .select()
         .single()
+    })
+  }, [request])
 
-      if (routeError) throw routeError
-
-      // Create route stops
-      if (routeData.order_ids.length > 0) {
-        const stops = routeData.order_ids.map((orderId, index) => ({
-          route_id: route.id,
-          order_id: orderId,
-          sequence_order: index + 1,
-          status: 'pending'
-        }))
-
-        const { error: stopsError } = await supabaseClient
-          .from('route_stops')
-          .insert(stops)
-
-        if (stopsError) throw stopsError
-
-        // Update orders with route assignment
-        const { error: ordersError } = await supabaseClient
-          .from('orders')
-          .update({ 
-            route_id: route.id,
-            status: 'assigned'
-          })
-          .in('id', routeData.order_ids)
-
-        if (ordersError) throw ordersError
-      }
-
-      setLoading(false)
-      return { success: true, data: route, error: null }
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Unknown error'
-      setError(errorMessage)
-      setLoading(false)
-      return { success: false, data: null, error: errorMessage }
-    }
-  }, [])
-
-  const updateRoute = useCallback(async (routeId: string, updates: Partial<Route>) => {
-    setLoading(true)
-    setError(null)
-    
-    try {
-      const { data, error: supabaseError } = await supabaseClient
+  const updateRoute = useCallback(async (routeId: string, updates: any) => {
+    return request(async () => {
+      return await supabase
         .from('routes')
         .update(updates)
         .eq('id', routeId)
         .select()
         .single()
-
-      if (supabaseError) throw supabaseError
-
-      setLoading(false)
-      return { success: true, data, error: null }
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Unknown error'
-      setError(errorMessage)
-      setLoading(false)
-      return { success: false, data: null, error: errorMessage }
-    }
-  }, [])
+    })
+  }, [request])
 
   const deleteRoute = useCallback(async (routeId: string) => {
-    setLoading(true)
-    setError(null)
-    
-    try {
-      // First, unassign orders from the route
-      await supabaseClient
-        .from('orders')
-        .update({ 
-          route_id: null,
-          status: 'pending'
-        })
-        .eq('route_id', routeId)
-
-      // Delete route stops
-      await supabaseClient
-        .from('route_stops')
-        .delete()
-        .eq('route_id', routeId)
-
-      // Delete the route
-      const { error: supabaseError } = await supabaseClient
+    return request(async () => {
+      return await supabase
         .from('routes')
         .delete()
         .eq('id', routeId)
-
-      if (supabaseError) throw supabaseError
-
-      setLoading(false)
-      return { success: true, error: null }
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Unknown error'
-      setError(errorMessage)
-      setLoading(false)
-      return { success: false, error: errorMessage }
-    }
-  }, [])
+    })
+  }, [request])
 
   const assignDriver = useCallback(async (routeId: string, driverId: string) => {
-    setLoading(true)
-    setError(null)
-    
-    try {
-      const { data, error: supabaseError } = await supabaseClient
+    return request(async () => {
+      return await supabase
         .from('routes')
         .update({ driver_id: driverId })
         .eq('id', routeId)
         .select()
         .single()
-
-      if (supabaseError) throw supabaseError
-
-      // Update driver availability
-      await supabaseClient
-        .from('user_profiles')
-        .update({ availability_status: 'busy' })
-        .eq('id', driverId)
-
-      setLoading(false)
-      return { success: true, data, error: null }
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Unknown error'
-      setError(errorMessage)
-      setLoading(false)
-      return { success: false, data: null, error: errorMessage }
-    }
-  }, [])
+    })
+  }, [request])
 
   return {
     createRoute,
@@ -341,108 +152,62 @@ export function useRouteMutations() {
   }
 }
 
-// General API hook for fetching data
-export function useApi<T>(
-  fetcher: () => Promise<T>,
-  dependencies: any[] = []
-) {
-  const [data, setData] = useState<T | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+export function useOrderMutations() {
+  const { request, loading, error } = useApi()
 
-  const fetchData = useCallback(async () => {
-    setLoading(true)
-    setError(null)
-    
-    try {
-      const result = await fetcher()
-      setData(result)
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Unknown error'
-      setError(errorMessage)
-    } finally {
-      setLoading(false)
-    }
-  }, dependencies)
+  const createOrder = useCallback(async (orderData: any) => {
+    return request(async () => {
+      return await supabase
+        .from('orders')
+        .insert([orderData])
+        .select()
+        .single()
+    })
+  }, [request])
+
+  const updateOrder = useCallback(async (orderId: string, updates: any) => {
+    return request(async () => {
+      return await supabase
+        .from('orders')
+        .update(updates)
+        .eq('id', orderId)
+        .select()
+        .single()
+    })
+  }, [request])
+
+  const updateOrderStatus = useCallback(async (
+    orderId: string, 
+    status: string,
+    notes?: string
+  ) => {
+    return request(async () => {
+      const updates: any = { 
+        status,
+        updated_at: new Date().toISOString()
+      }
+      
+      if (notes) {
+        updates.delivery_notes = notes
+      }
+
+      return await supabase
+        .from('orders')
+        .update(updates)
+        .eq('id', orderId)
+        .select()
+        .single()
+    })
+  }, [request])
 
   return {
-    data,
+    createOrder,
+    updateOrder,
+    updateOrderStatus,
     loading,
-    error,
-    refetch: fetchData
+    error
   }
 }
 
-// Fetch drivers
-export function useDrivers() {
-  return useApi(async () => {
-    const { data, error } = await supabaseClient
-      .from('user_profiles')
-      .select('*')
-      .eq('role', 'driver')
-      .order('created_at', { ascending: false })
-
-    if (error) throw error
-    return data as Driver[]
-  })
-}
-
-// Fetch routes
-export function useRoutes(filters?: {
-  status?: string
-  driver_id?: string
-}) {
-  return useApi(async () => {
-    let query = supabaseClient
-      .from('routes')
-      .select(`
-        *,
-        user_profiles!routes_driver_id_fkey (
-          id,
-          first_name,
-          last_name,
-          email
-        )
-      `)
-      .order('created_at', { ascending: false })
-
-    if (filters?.status) {
-      query = query.eq('status', filters.status)
-    }
-
-    if (filters?.driver_id) {
-      query = query.eq('driver_id', filters.driver_id)
-    }
-
-    const { data, error } = await query
-
-    if (error) throw error
-    return data as Route[]
-  }, [filters])
-}
-
-// Fetch orders
-export function useOrders(filters?: {
-  status?: string
-  driver_id?: string
-}) {
-  return useApi(async () => {
-    let query = supabaseClient
-      .from('orders')
-      .select('*')
-      .order('created_at', { ascending: false })
-
-    if (filters?.status) {
-      query = query.eq('status', filters.status)
-    }
-
-    if (filters?.driver_id) {
-      query = query.eq('driver_id', filters.driver_id)
-    }
-
-    const { data, error } = await query
-
-    if (error) throw error
-    return data as Order[]
-  }, [filters])
-}
+// Default export
+export default useApi

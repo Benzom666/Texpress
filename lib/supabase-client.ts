@@ -1,6 +1,4 @@
 import { createClient as createSupabaseClient } from '@supabase/supabase-js'
-import { createServerClient } from '@supabase/ssr'
-import { cookies } from 'next/headers'
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
@@ -10,36 +8,25 @@ if (!supabaseUrl || !supabaseAnonKey) {
 }
 
 // Client-side Supabase client
-export const supabaseClient = createSupabaseClient(supabaseUrl, supabaseAnonKey)
+export const supabaseClient = createSupabaseClient(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+  },
+})
 
 // Named export for createClient function
 export const createClient = () => {
-  return createSupabaseClient(supabaseUrl, supabaseAnonKey)
-}
-
-// Server-side Supabase client with cookie support
-export const createServerSupabaseClient = async () => {
-  const cookieStore = await cookies()
-
-  return createServerClient(supabaseUrl, supabaseAnonKey, {
-    cookies: {
-      getAll() {
-        return cookieStore.getAll()
-      },
-      setAll(cookiesToSet) {
-        try {
-          cookiesToSet.forEach(({ name, value, options }) =>
-            cookieStore.set(name, value, options)
-          )
-        } catch {
-          // The `setAll` method was called from a Server Component.
-          // This can be ignored if you have middleware refreshing
-          // user sessions.
-        }
-      },
+  return createSupabaseClient(supabaseUrl, supabaseAnonKey, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
     },
   })
 }
+
+// Export the client instance as well for backward compatibility
+export { supabaseClient as supabase }
 
 // Default export
 export default supabaseClient

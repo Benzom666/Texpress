@@ -1,18 +1,6 @@
-import { supabaseClient } from './supabase-client'
+import { supabase } from '@/lib/supabase'
 
-export interface RouteStop {
-  id: string
-  route_id: string
-  order_id: string
-  sequence_order: number
-  estimated_arrival_time?: string
-  actual_arrival_time?: string
-  status: 'pending' | 'completed' | 'skipped'
-  notes?: string
-  coordinates?: [number, number]
-}
-
-export interface Route {
+export interface RouteData {
   id: string
   route_number: string
   route_name: string
@@ -27,181 +15,73 @@ export interface Route {
   updated_at: string
   started_at?: string
   completed_at?: string
-  stops?: RouteStop[]
 }
 
-export interface CreateRouteData {
-  route_name: string
-  driver_id?: string
-  order_ids: string[]
-  created_by: string
-}
-
-export interface OptimizeRouteOptions {
-  depot_coordinates?: [number, number]
-  vehicle_capacity?: number
-  max_duration?: number
-  optimization_type?: 'distance' | 'time' | 'balanced'
+export interface RouteStop {
+  id: string
+  route_id: string
+  order_id: string
+  sequence_order: number
+  estimated_arrival_time?: string
+  actual_arrival_time?: string
+  status: 'pending' | 'completed' | 'skipped'
+  notes?: string
 }
 
 export class RouteManager {
-  private supabase = supabaseClient
-
-  /**
-   * Create a new route with orders
-   */
-  async createRoute(data: CreateRouteData): Promise<Route | null> {
+  static async createRoute(routeData: Partial<RouteData>): Promise<RouteData | null> {
     try {
-      // Generate route number
-      const routeNumber = await this.generateRouteNumber()
-      
-      // Create the route
-      const { data: route, error: routeError } = await this.supabase
+      const { data, error } = await supabase
         .from('routes')
-        .insert([{
-          route_number: routeNumber,
-          route_name: data.route_name,
-          driver_id: data.driver_id,
-          status: 'planned',
-          total_stops: data.order_ids.length,
-          created_by: data.created_by
-        }])
+        .insert([routeData])
         .select()
         .single()
 
-      if (routeError) throw routeError
-
-      // Create route stops
-      if (data.order_ids.length > 0) {
-        const stops = data.order_ids.map((orderId, index) => ({
-          route_id: route.id,
-          order_id: orderId,
-          sequence_order: index + 1,
-          status: 'pending' as const
-        }))
-
-        const { error: stopsError } = await this.supabase
-          .from('route_stops')
-          .insert(stops)
-
-        if (stopsError) throw stopsError
-
-        // Update orders with route assignment
-        const { error: ordersError } = await this.supabase
-          .from('orders')
-          .update({ 
-            route_id: route.id,
-            status: 'assigned'
-          })
-          .in('id', data.order_ids)
-
-        if (ordersError) throw ordersError
+      if (error) {
+        console.error('Error creating route:', error)
+        return null
       }
 
-      return route
+      return data
     } catch (error) {
       console.error('Error creating route:', error)
       return null
     }
   }
 
-  /**
-   * Get route by ID with stops
-   */
-  async getRoute(routeId: string): Promise<Route | null> {
+  static async getRoute(routeId: string): Promise<RouteData | null> {
     try {
-      const { data: route, error: routeError } = await this.supabase
+      const { data, error } = await supabase
         .from('routes')
-        .select(`
-          *,
-          route_stops (
-            *,
-            orders (
-              id,
-              order_number,
-              customer_name,
-              delivery_address,
-              latitude,
-              longitude,
-              status
-            )
-          )
-        `)
+        .select('*')
         .eq('id', routeId)
         .single()
 
-      if (routeError) throw routeError
+      if (error) {
+        console.error('Error fetching route:', error)
+        return null
+      }
 
-      return route
+      return data
     } catch (error) {
       console.error('Error fetching route:', error)
       return null
     }
   }
 
-  /**
-   * Get all routes with optional filters
-   */
-  async getRoutes(filters?: {
-    status?: Route['status']
-    driver_id?: string
-    date_from?: string
-    date_to?: string
-  }): Promise<Route[]> {
+  static async updateRoute(routeId: string, updates: Partial<RouteData>): Promise<RouteData | null> {
     try {
-      let query = this.supabase
-        .from('routes')
-        .select(`
-          *,
-          user_profiles!routes_driver_id_fkey (
-            id,
-            first_name,
-            last_name,
-            email
-          )
-        `)
-        .order('created_at', { ascending: false })
-
-      if (filters?.status) {
-        query = query.eq('status', filters.status)
-      }
-
-      if (filters?.driver_id) {
-        query = query.eq('driver_id', filters.driver_id)
-      }
-
-      if (filters?.date_from) {
-        query = query.gte('created_at', filters.date_from)
-      }
-
-      if (filters?.date_to) {
-        query = query.lte('created_at', filters.date_to)
-      }
-
-      const { data, error } = await query
-
-      if (error) throw error
-
-      return data || []
-    } catch (error) {
-      console.error('Error fetching routes:', error)
-      return []
-    }
-  }
-
-  /**
-   * Update route
-   */
-  async updateRoute(routeId: string, updates: Partial<Route>): Promise<Route | null> {
-    try {
-      const { data, error } = await this.supabase
+      const { data, error } = await supabase
         .from('routes')
         .update(updates)
         .eq('id', routeId)
         .select()
         .single()
 
-      if (error) throw error
+      if (error) {
+        console.error('Error updating route:', error)
+        return null
+      }
 
       return data
     } catch (error) {
@@ -210,33 +90,17 @@ export class RouteManager {
     }
   }
 
-  /**
-   * Delete route
-   */
-  async deleteRoute(routeId: string): Promise<boolean> {
+  static async deleteRoute(routeId: string): Promise<boolean> {
     try {
-      // First, unassign orders from the route
-      await this.supabase
-        .from('orders')
-        .update({ 
-          route_id: null,
-          status: 'pending'
-        })
-        .eq('route_id', routeId)
-
-      // Delete route stops
-      await this.supabase
-        .from('route_stops')
-        .delete()
-        .eq('route_id', routeId)
-
-      // Delete the route
-      const { error } = await this.supabase
+      const { error } = await supabase
         .from('routes')
         .delete()
         .eq('id', routeId)
 
-      if (error) throw error
+      if (error) {
+        console.error('Error deleting route:', error)
+        return false
+      }
 
       return true
     } catch (error) {
@@ -245,265 +109,151 @@ export class RouteManager {
     }
   }
 
-  /**
-   * Assign driver to route
-   */
-  async assignDriver(routeId: string, driverId: string): Promise<Route | null> {
+  static async getRoutesByDriver(driverId: string): Promise<RouteData[]> {
     try {
-      const { data, error } = await this.supabase
+      const { data, error } = await supabase
+        .from('routes')
+        .select('*')
+        .eq('driver_id', driverId)
+        .order('created_at', { ascending: false })
+
+      if (error) {
+        console.error('Error fetching driver routes:', error)
+        return []
+      }
+
+      return data || []
+    } catch (error) {
+      console.error('Error fetching driver routes:', error)
+      return []
+    }
+  }
+
+  static async getAllRoutes(): Promise<RouteData[]> {
+    try {
+      const { data, error } = await supabase
+        .from('routes')
+        .select('*')
+        .order('created_at', { ascending: false })
+
+      if (error) {
+        console.error('Error fetching all routes:', error)
+        return []
+      }
+
+      return data || []
+    } catch (error) {
+      console.error('Error fetching all routes:', error)
+      return []
+    }
+  }
+
+  static async assignDriver(routeId: string, driverId: string): Promise<boolean> {
+    try {
+      const { error } = await supabase
         .from('routes')
         .update({ driver_id: driverId })
         .eq('id', routeId)
-        .select()
-        .single()
 
-      if (error) throw error
-
-      // Update driver availability
-      await this.supabase
-        .from('user_profiles')
-        .update({ availability_status: 'assigned' })
-        .eq('id', driverId)
-
-      return data
-    } catch (error) {
-      console.error('Error assigning driver:', error)
-      return null
-    }
-  }
-
-  /**
-   * Start route
-   */
-  async startRoute(routeId: string): Promise<Route | null> {
-    try {
-      const { data, error } = await this.supabase
-        .from('routes')
-        .update({ 
-          status: 'in_progress',
-          started_at: new Date().toISOString()
-        })
-        .eq('id', routeId)
-        .select()
-        .single()
-
-      if (error) throw error
-
-      return data
-    } catch (error) {
-      console.error('Error starting route:', error)
-      return null
-    }
-  }
-
-  /**
-   * Complete route
-   */
-  async completeRoute(routeId: string): Promise<Route | null> {
-    try {
-      const now = new Date().toISOString()
-      
-      const { data, error } = await this.supabase
-        .from('routes')
-        .update({ 
-          status: 'completed',
-          completed_at: now
-        })
-        .eq('id', routeId)
-        .select()
-        .single()
-
-      if (error) throw error
-
-      // Update driver availability
-      if (data.driver_id) {
-        await this.supabase
-          .from('user_profiles')
-          .update({ availability_status: 'available' })
-          .eq('id', data.driver_id)
-      }
-
-      return data
-    } catch (error) {
-      console.error('Error completing route:', error)
-      return null
-    }
-  }
-
-  /**
-   * Optimize route order using simple distance-based algorithm
-   */
-  async optimizeRoute(routeId: string, options?: OptimizeRouteOptions): Promise<boolean> {
-    try {
-      // Get route with stops and order coordinates
-      const route = await this.getRoute(routeId)
-      if (!route || !route.stops) return false
-
-      // Simple optimization: sort by distance from depot or first stop
-      const depot = options?.depot_coordinates || [0, 0]
-      
-      const optimizedStops = route.stops
-        .map(stop => ({
-          ...stop,
-          distance: this.calculateDistance(
-            depot,
-            stop.coordinates || [0, 0]
-          )
-        }))
-        .sort((a, b) => a.distance - b.distance)
-        .map((stop, index) => ({
-          id: stop.id,
-          sequence_order: index + 1
-        }))
-
-      // Update stop sequences
-      for (const stop of optimizedStops) {
-        await this.supabase
-          .from('route_stops')
-          .update({ sequence_order: stop.sequence_order })
-          .eq('id', stop.id)
+      if (error) {
+        console.error('Error assigning driver to route:', error)
+        return false
       }
 
       return true
     } catch (error) {
-      console.error('Error optimizing route:', error)
+      console.error('Error assigning driver to route:', error)
       return false
     }
   }
 
-  /**
-   * Generate unique route number
-   */
-  private async generateRouteNumber(): Promise<string> {
-    const today = new Date().toISOString().split('T')[0].replace(/-/g, '')
-    
-    // Get count of routes created today
-    const { count } = await this.supabase
-      .from('routes')
-      .select('*', { count: 'exact', head: true })
-      .gte('created_at', new Date().toISOString().split('T')[0])
-      .lt('created_at', new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().split('T')[0])
-
-    const sequence = String((count || 0) + 1).padStart(3, '0')
-    return `RT${today}${sequence}`
-  }
-
-  /**
-   * Calculate distance between two coordinates (Haversine formula)
-   */
-  private calculateDistance(coord1: [number, number], coord2: [number, number]): number {
-    const [lon1, lat1] = coord1
-    const [lon2, lat2] = coord2
-    
-    const R = 6371 // Earth's radius in kilometers
-    const dLat = this.toRadians(lat2 - lat1)
-    const dLon = this.toRadians(lon2 - lon1)
-    
-    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-              Math.cos(this.toRadians(lat1)) * Math.cos(this.toRadians(lat2)) *
-              Math.sin(dLon / 2) * Math.sin(dLon / 2)
-    
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-    return R * c
-  }
-
-  private toRadians(degrees: number): number {
-    return degrees * (Math.PI / 180)
-  }
-
-  // Static methods for backward compatibility
-  static async getCurrentRoute(driverId: string): Promise<any> {
-    const manager = new RouteManager()
-    const routes = await manager.getRoutes({ driver_id: driverId, status: 'in_progress' })
-    return routes[0] || null
-  }
-
-  static async createOptimizedRoute(driverId: string, orders: any[]): Promise<any> {
-    const manager = new RouteManager()
-    const routeData: CreateRouteData = {
-      route_name: `Optimized Route ${new Date().toLocaleDateString()}`,
-      driver_id: driverId,
-      order_ids: orders.map(o => o.id),
-      created_by: driverId
-    }
-    return await manager.createRoute(routeData)
-  }
-
-  static async completeDelivery(routeId: string, orderId: string, actualTime?: number, actualDistance?: number): Promise<any> {
-    const manager = new RouteManager()
-    // Update the specific stop as completed
-    await manager.supabase
-      .from('route_stops')
-      .update({ 
-        status: 'completed',
-        actual_arrival_time: new Date().toISOString()
-      })
-      .eq('route_id', routeId)
-      .eq('order_id', orderId)
-    
-    return await manager.getRoute(routeId)
-  }
-
-  static async addDeliveryToRoute(routeId: string, order: any): Promise<any> {
-    const manager = new RouteManager()
-    // Add new stop to route
-    const { data: stops } = await manager.supabase
-      .from('route_stops')
-      .select('sequence_order')
-      .eq('route_id', routeId)
-      .order('sequence_order', { ascending: false })
-      .limit(1)
-
-    const nextSequence = (stops?.[0]?.sequence_order || 0) + 1
-
-    await manager.supabase
-      .from('route_stops')
-      .insert({
-        route_id: routeId,
-        order_id: order.id,
-        sequence_order: nextSequence,
-        status: 'pending'
-      })
-
-    return await manager.getRoute(routeId)
-  }
-
-  static async cancelDelivery(routeId: string, orderId: string, reason: string): Promise<any> {
-    const manager = new RouteManager()
-    await manager.supabase
-      .from('route_stops')
-      .update({ 
-        status: 'skipped',
-        notes: reason
-      })
-      .eq('route_id', routeId)
-      .eq('order_id', orderId)
-    
-    return await manager.getRoute(routeId)
-  }
-
-  static async recalculateRoute(routeId: string, pendingOrders: any[]): Promise<any> {
-    const manager = new RouteManager()
-    await manager.optimizeRoute(routeId)
-    return await manager.getRoute(routeId)
-  }
-
-  static async endShift(routeId: string): Promise<void> {
-    const manager = new RouteManager()
-    await manager.updateRoute(routeId, { status: 'completed', completed_at: new Date().toISOString() })
-  }
-
-  static async safeEndRoute(routeId: string): Promise<void> {
+  static async updateRouteStatus(routeId: string, status: RouteData['status']): Promise<boolean> {
     try {
-      await this.endShift(routeId)
+      const updates: Partial<RouteData> = { status }
+      
+      if (status === 'in_progress') {
+        updates.started_at = new Date().toISOString()
+      } else if (status === 'completed') {
+        updates.completed_at = new Date().toISOString()
+      }
+
+      const { error } = await supabase
+        .from('routes')
+        .update(updates)
+        .eq('id', routeId)
+
+      if (error) {
+        console.error('Error updating route status:', error)
+        return false
+      }
+
+      return true
     } catch (error) {
-      console.error('Error ending route:', error)
+      console.error('Error updating route status:', error)
+      return false
+    }
+  }
+
+  static async getRouteStops(routeId: string): Promise<RouteStop[]> {
+    try {
+      const { data, error } = await supabase
+        .from('route_stops')
+        .select('*')
+        .eq('route_id', routeId)
+        .order('sequence_order', { ascending: true })
+
+      if (error) {
+        console.error('Error fetching route stops:', error)
+        return []
+      }
+
+      return data || []
+    } catch (error) {
+      console.error('Error fetching route stops:', error)
+      return []
+    }
+  }
+
+  static async addRouteStop(routeStop: Partial<RouteStop>): Promise<RouteStop | null> {
+    try {
+      const { data, error } = await supabase
+        .from('route_stops')
+        .insert([routeStop])
+        .select()
+        .single()
+
+      if (error) {
+        console.error('Error adding route stop:', error)
+        return null
+      }
+
+      return data
+    } catch (error) {
+      console.error('Error adding route stop:', error)
+      return null
+    }
+  }
+
+  static async updateRouteStop(stopId: string, updates: Partial<RouteStop>): Promise<boolean> {
+    try {
+      const { error } = await supabase
+        .from('route_stops')
+        .update(updates)
+        .eq('id', stopId)
+
+      if (error) {
+        console.error('Error updating route stop:', error)
+        return false
+      }
+
+      return true
+    } catch (error) {
+      console.error('Error updating route stop:', error)
+      return false
     }
   }
 }
 
-// Export singleton instance
-export const routeManager = new RouteManager()
-
-// Default export
+// Export the class as default and named export for compatibility
+export const routeManager = RouteManager
 export default RouteManager

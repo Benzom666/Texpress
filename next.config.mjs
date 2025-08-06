@@ -1,6 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  serverExternalPackages: ['mapbox-gl'],
+  serverExternalPackages: ['@supabase/supabase-js'],
+  experimental: {
+    // Remove the deprecated serverComponentsExternalPackages
+  },
   webpack: (config, { isServer }) => {
     if (!isServer) {
       config.resolve.fallback = {
@@ -13,11 +16,14 @@ const nextConfig = {
     return config
   },
   images: {
-    domains: ['placeholder.svg'],
+    domains: ['localhost'],
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: '**',
+      },
+    ],
     unoptimized: true,
-  },
-  env: {
-    NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN: process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN,
   },
   eslint: {
     ignoreDuringBuilds: true,
